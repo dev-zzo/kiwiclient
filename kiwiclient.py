@@ -36,14 +36,14 @@ def clamp(x, xmin, xmax):
         return xmax
     return x
 
-class decoder(object):
+class ImaAdpcmDecoder(object):
     def __init__(self):
         self.index = 0
         self.prev = 0
 
     def _decode_sample(self, code):
         step = stepSizeTable[self.index]
-        self.index = clamp(self.index + indexAdjustTable[code], 0, len(stepSizeTable))
+        self.index = clamp(self.index + indexAdjustTable[code], 0, len(stepSizeTable) - 1)
         difference = step >> 3
         if ( code & 1 ):
             difference += step >> 2
@@ -83,7 +83,8 @@ class KiwiError(Exception):
     pass
 class KiwiTooBusyError(KiwiError):
     pass
-
+class KiwiBadPasswordError(KiwiError):
+    pass
 
 class KiwiSDRClientBase(object):
     """KiwiSDR WebSocket client."""
@@ -96,9 +97,10 @@ class KiwiSDRClientBase(object):
         self._socket = socket.socket()
         self._socket.settimeout(self._options.socket_timeout)
         self._socket.connect((host, port))
-        self._prepare_stream('/%d/AUD' % int(time.time()))
+        self._prepare_stream(host, port, '/%d/AUD' % int(time.time()))
 
-    def _prepare_stream(self, which):
+    def _prepare_stream(self, host, port, which):
+        import mod_pywebsocket.common
         from mod_pywebsocket.stream import Stream
         from mod_pywebsocket.stream import StreamOptions
 
@@ -106,7 +108,7 @@ class KiwiSDRClientBase(object):
         handshake.handshake(which)
 
         request = wsclient.ClientRequest(self._socket)
-        request.ws_version = common.VERSION_HYBI13
+        request.ws_version = mod_pywebsocket.common.VERSION_HYBI13
 
         stream_option = StreamOptions()
         stream_option.mask_send = True
@@ -148,7 +150,9 @@ class KiwiSDRClientBase(object):
     def _process_msg_param(self, name, value):
         print "%s: %s" % (name, value)
         if name == 'too_busy':
-            raise KiwiTooBusyError('all %d client slots taken' % value)
+            raise KiwiTooBusyError('all %s client slots taken' % value)
+        if name == 'badp' and value == '1':
+            raise KiwiBadPasswordError()
         if name == 'audio_rate':
             self._set_ar_ok(int(value), 44100)
         elif name == 'sample_rate':
@@ -185,7 +189,7 @@ class KiwiSDRClientBase(object):
     def run(self):
         """Run the client."""
 
-        self._decoder = imaadpcm.decoder()
+        self._decoder = ImaAdpcmDecoder()
         try:
             self._set_auth('kiwi', '')
             # Loop forever
