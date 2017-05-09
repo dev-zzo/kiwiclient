@@ -1,20 +1,34 @@
+import array
 import codecs
 import logging
 import os
 import struct
 import sys
 import time
+import traceback
 from optparse import OptionParser
 
 import kiwiclient
+
+def _write_wav_header(fp, filesize, samplerate):
+    fp.write(struct.pack('<4sI4s', 'RIFF', filesize - 8, 'WAVE'))
+    fp.write(struct.pack('<4sIHHIIHH', 'fmt ', 16, 1, 1, samplerate, samplerate * 16 / 8, 16 / 8, 16))
+    fp.write(struct.pack('<4sI', 'data', filesize - 12 - 8 - 16 - 8))
 
 class KiwiRecorder(kiwiclient.KiwiSDRClientBase):
     def __init__(self, options):
         super(KiwiRecorder, self).__init__()
         self._options = options
         self._start_ts = None
+        self._squelch_on_seq = None
+        self._nf_array = array.array('i')
+        for x in xrange(65):
+            self._nf_array.insert(x, 0)
+        self._nf_samples = 0
+        self._nf_index = 0
 
     def _setup_rx_params(self):
+        self._logger.info('Setting up reception')
         mod = self._options.modulation
         lp_cut = self._options.lp_cut
         hp_cut = self._options.hp_cut
@@ -25,14 +39,47 @@ class KiwiRecorder(kiwiclient.KiwiSDRClientBase):
         self.set_mod(mod, lp_cut, hp_cut, freq)
         self.set_agc(True)
 
-    def _process_samples(self, seq, samples, rssi):
-        self._write_samples(samples)
+    def _process_samples(self, seq, samples, rssi, thresh=12):
         sys.stdout.write('\rBlock: %08x, RSSI: %-04d' % (seq, rssi))
+        if self._nf_samples < len(self._nf_array) or self._squelch_on_seq is None:
+            self._nf_array[self._nf_index] = rssi
+            self._nf_index += 1
+            if self._nf_index == len(self._nf_array):
+                self._nf_index = 0
+        if self._nf_samples < len(self._nf_array):
+            self._nf_samples += 1
+            return
+            
+        median_nf = sorted(self._nf_array)[len(self._nf_array) // 3]
+        rssi_thresh = median_nf + thresh
+        is_open = self._squelch_on_seq is not None
+        if is_open:
+            rssi_thresh -= 6
+        rssi_green = rssi >= rssi_thresh
+        if rssi_green:
+            self._squelch_on_seq = seq
+            is_open = True
+        sys.stdout.write(' Median: %-04d Thr: %-04d %s' % (median_nf, rssi_thresh, ("s", "S")[is_open]))
+        if not is_open:
+            return
+        if seq > self._squelch_on_seq + 45:
+            print "\nSquelch closed"
+            self._squelch_on_seq = None
+            self._start_ts = None
+            return
+        self._write_samples(samples)
 
     def _get_output_filename(self):
-        ts = time.strftime('%Y%m%dT%H%MZ', self._start_ts)
+        ts = time.strftime('%Y%m%dT%H%M%SZ', self._start_ts)
         sta = '' if self._options.station is None else '_' + self._options.station
         return '%s_%d_%s%s.wav' % (ts, int(self._options.frequency * 1000), self._options.modulation, sta)
+
+    def _update_wav_header(self):
+        with open(self._get_output_filename(), 'r+b') as fp:
+            fp.seek(0, os.SEEK_END)
+            filesize = fp.tell()
+            fp.seek(0, os.SEEK_SET)
+            _write_wav_header(fp, filesize, int(self._sample_rate))
 
     def _write_samples(self, samples):
         """Output to a file on the disk."""
@@ -41,13 +88,12 @@ class KiwiRecorder(kiwiclient.KiwiSDRClientBase):
             self._start_ts = now
             # Write a static WAV header
             with open(self._get_output_filename(), 'wb') as fp:
-                fp.write(struct.pack('<4sI4s', 'RIFF', 0x7FFFFFFF, 'WAVE'))
-                fp.write(struct.pack('<4sIHHIIHH', 'fmt ', 16, 1, 1, int(self._sample_rate), int(self._sample_rate) * 16 / 8, 16 / 8, 16))
-                fp.write(struct.pack('<4sI', 'data', 0x7FFFFFFF))
-            print "Started a new file."
+                _write_wav_header(fp, 666, int(self._sample_rate))
+            print "\nStarted a new file: %s" % (self._get_output_filename())
         with open(self._get_output_filename(), 'ab') as fp:
             # TODO: something better than that
             samples.tofile(fp)
+        self._update_wav_header()
 
 
 def main():
@@ -116,7 +162,7 @@ def main():
             time.sleep(15)
             continue
         except Exception as e:
-            print repr(e)
+            traceback.print_exc()
             break
 
 
