@@ -131,22 +131,22 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
         self._options = options
         self._ioc = options.ioc
         self._lpm = options.lpm
-        self._prevX = complex(0)
         
-        self._resampler = Interpolator(1.0)
+        self._state = 'idle'
         
         self._startstop_buffer = []
         self._start_samples = [ False for x in xrange(16) ]
         self._stop_samples = [ False for x in xrange(16) ]
         self._startstop_index = 0
 
-        self._state = 'idle'
-        
+        self._prevX = complex(0)
         self._phasing_count = 0
-        
+        self._resampler = Interpolator(1.0)
         self._rows = []
         self._pixel_buffer = array.array('f')
+        self._pixels_per_line = 1600
         self._max_height = 99999
+        
         self._new_roll()
         if options.force:
             self._switch_state('printing')
@@ -207,7 +207,7 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
                 stop_detected = popcount_thresh(self._stop_samples, len(self._stop_samples) * 3 / 4)
 
                 if start_detected:
-                    if self._state != 'starting':
+                    if self._state == 'idle':
                         print "\n\nSTART DETECTED\n"
                         if self._state == 'printing':
                             self._flush_rows()
@@ -224,6 +224,8 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
         self._rows = []
         ts = time.strftime('%Y%m%dT%H%MZ', time.gmtime())
         self._output_name = '%s_%d' % (ts, int(self._options.frequency * 1000))
+        if self._options.station:
+            self._output_name += '_' + self._options.station
 
     def _process_pixels(self, samples, sample_rate):
         if not self._state in ('phasing', 'printing'):
@@ -236,42 +238,46 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
         pixels = array.array('f', mapper_df_to_intensity(detected, black_thresh, white_thresh))
         # Scale and adjust pixel rate
         samples_per_line = sample_rate * 60.0 / self._lpm
-        # Sane aspect ration comes with width = 192000/lpm (px)
-        pixels_per_line = int((1600 * 120) / self._lpm)
-        self._resampler.set_factor(samples_per_line / pixels_per_line)
+        self._resampler.set_factor(samples_per_line / self._pixels_per_line)
         self._resampler.refill(pixels)
         self._pixel_buffer.extend(self._resampler)
         
         if self._state == 'phasing':
-            # Count attempts at phasing to avoid getting stuck
-            self._phasing_count += 1
-            # TODO: skip 3-4 lines
-            if self._phasing_count <= 20:
-                phasing_pulse_size = 70
-                i = 0
-                while i + phasing_pulse_size < len(self._pixel_buffer):
-                    s = 0
-                    for j in xrange(i, i + phasing_pulse_size):
-                        s += clamp(self._pixel_buffer[j], 0, 1)
-                    s /= phasing_pulse_size
-                    if s >= 0.8:
-                        self._pixel_buffer = self._pixel_buffer[i + phasing_pulse_size * 3 // 4:]
-                        print "Phasing OK"
-                        self._switch_state('printing')
-                        break
-                    i += 1
-                else:
-                    self._pixel_buffer = self._pixel_buffer[min(0, i - phasing_pulse_size):]
-            else:
-                print "Phasing failed!"
-                self._switch_state('printing')
+            self._process_phasing()
         else:
             # Cut into rows of pixels
-            while len(self._pixel_buffer) >= pixels_per_line:
-                row = self._pixel_buffer[:pixels_per_line]
-                new_buffer = self._pixel_buffer[pixels_per_line:]
+            while len(self._pixel_buffer) >= self._pixels_per_line:
+                row = self._pixel_buffer[:self._pixels_per_line]
+                new_buffer = self._pixel_buffer[self._pixels_per_line:]
                 self._pixel_buffer = new_buffer
                 self._process_row(row)
+
+    def _process_phasing(self):
+        # Count attempts at phasing to avoid getting stuck
+        self._phasing_count += 1
+        # Skip 3-4 lines; it seems phasing is not reliable when started right away
+        if self._phasing_count <= 3:
+            self._pixel_buffer = self._pixel_buffer[self._pixels_per_line:]
+            return
+        if self._phasing_count <= 25:
+            phasing_pulse_size = 70
+            i = 0
+            while i + phasing_pulse_size < len(self._pixel_buffer):
+                s = 0
+                for j in xrange(i, i + phasing_pulse_size):
+                    s += clamp(self._pixel_buffer[j], 0, 1)
+                s /= phasing_pulse_size
+                if s >= 0.8:
+                    self._pixel_buffer = self._pixel_buffer[i + phasing_pulse_size * 3 // 4:]
+                    print "Phasing OK"
+                    self._switch_state('printing')
+                    break
+                i += 1
+            else:
+                self._pixel_buffer = self._pixel_buffer[min(0, i - phasing_pulse_size):]
+            return
+        print "Phasing failed!"
+        self._switch_state('printing')
 
     def _process_row(self, row):
         pixels = array.array('B')
