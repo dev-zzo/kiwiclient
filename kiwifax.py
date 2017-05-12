@@ -5,13 +5,25 @@ import os
 import struct
 import sys
 import time
-import png
 import math
 import cmath
 import traceback
 from optparse import OptionParser
 
 import kiwiclient
+import png
+
+
+# Known bugs:
+# * Start/stop detection doesn't work for 60 RPM
+
+
+def dump_to_csv(filename, data):
+    with open(filename, 'a') as fp:
+        for x in data:
+            fp.write("%.6f," % x)
+        fp.write("\n")
+
 
 def clamp(x, xmin, xmax):
     if x < xmin:
@@ -53,25 +65,12 @@ def dft_complex(input):
 def power_db(input):
     return [ 10 * math.log10(abs(x) / len(input)) for x in input ]
 
-def dump_to_csv(filename, data):
-    with open(filename, 'a') as fp:
-        for x in data:
-            fp.write("%.6f," % x)
-        fp.write("\n")
-
 def popcount_thresh(X, thresh):
     count = 0
     for x in X:
         if x:
             count += 1
     return count >= thresh
-
-def interp_cubic(t, p0, p1, p2, p3):
-    a0 = p3 - p2 - p0 + p1
-    a1 = p0 - p1 - a0
-    a2 = p2 - p0
-    a3 = p1
-    return a0 * (t*t*t) + a1 * (t*t) + a2 * t + a3
 
 def interp_hermite(t, p0, p1, p2, p3):
     c0 = p1
@@ -109,15 +108,6 @@ class Interpolator:
         self._t += self._dt
         return interp_hermite(t_frac, self._buffer[t_int], self._buffer[t_int + 1], self._buffer[t_int + 2], self._buffer[t_int + 3])
 
-def test_interp():
-    I = Interpolator(0.4)
-    I.refill([0,1,2,3,4,5])
-    for x in I:
-        print x
-    I.refill([6,7,8])
-    for x in I:
-        print x
-
 def peak_around(P, bin, delta):
     return sorted(P[bin-delta:bin+delta+1])[-1]
 
@@ -125,15 +115,16 @@ def mapper_df_to_intensity(dfs, black_thresh, white_thresh):
     for x in dfs:
         yield norm_clamp(x, black_thresh, white_thresh)
 
+
 class KiwiFax(kiwiclient.KiwiSDRClientBase):
     def __init__(self, options):
         super(KiwiFax, self).__init__()
         self._options = options
         self._ioc = options.ioc
         self._lpm = options.lpm
-        
+
         self._state = 'idle'
-        
+
         self._startstop_buffer = []
         self._start_samples = [ False for x in xrange(16) ]
         self._stop_samples = [ False for x in xrange(16) ]
@@ -146,7 +137,7 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
         self._pixel_buffer = array.array('f')
         self._pixels_per_line = 1600
         self._max_height = 99999
-        
+
         self._new_roll()
         if options.force:
             self._switch_state('printing')
@@ -197,7 +188,7 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
                 else:
                     detect_start = detect_stop = False
                 sys.stdout.write(" %.2f %s%s%s%s" % (nf_level, "wW"[detect_white], "bB"[detect_black], "sS"[detect_start], "tT"[detect_stop]))
-                
+
                 self._start_samples[self._startstop_index] = detect_start
                 self._stop_samples[self._startstop_index] = detect_stop
                 self._startstop_index += 1
@@ -241,7 +232,7 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
         self._resampler.set_factor(samples_per_line / self._pixels_per_line)
         self._resampler.refill(pixels)
         self._pixel_buffer.extend(self._resampler)
-        
+
         if self._state == 'phasing':
             self._process_phasing()
         else:
@@ -331,7 +322,7 @@ def main():
     parser.add_option('-F', '--force-start',
                       dest='force',
                       action='store_true', default=False,
-                      help='Frequency to tune to, in kHz.')
+                      help='Force the decoding without waiting for start tone or phasing')
     parser.add_option('-i', '--ioc',
                       dest='ioc',
                       type='int', default=576,
@@ -340,10 +331,10 @@ def main():
                       dest='lpm',
                       type='int', default=120,
                       help='Lines per minute.')
-    parser.add_option('--sr-coeff', '--sr-coeff',
-                      dest='sr_coeff',
-                      type='float', default=1.0,
-                      help='Sample frequency correction; increase to make lines shorter, decrease to make lines longer')
+    #parser.add_option('--sr-coeff', '--sr-coeff',
+    #                  dest='sr_coeff',
+    #                  type='float', default=1.0,
+    #                  help='Sample frequency correction; increase to make lines shorter, decrease to make lines longer')
 
     (options, unused_args) = parser.parse_args()
 
@@ -351,7 +342,7 @@ def main():
 
     while True:
         recorder = KiwiFax(options)
-        
+
         # Connect
         try:
             recorder.connect(options.server_host, options.server_port)
@@ -367,7 +358,7 @@ def main():
             recorder.run()
             break
         except (kiwiclient.KiwiTooBusyError, kiwiclient.KiwiBadPasswordError):
-            print "Server too busy now"
+            print "Server too busy now, sleeping and reconnecting"
             time.sleep(15)
             continue
         except Exception as e:
@@ -376,7 +367,5 @@ def main():
 
 
 if __name__ == '__main__':
-    #test_interp()
-    #sys.exit(0)
     main()
 # EOF
