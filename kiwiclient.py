@@ -83,6 +83,8 @@ class KiwiError(Exception):
     pass
 class KiwiTooBusyError(KiwiError):
     pass
+class KiwiDownError(KiwiError):
+    pass
 class KiwiBadPasswordError(KiwiError):
     pass
 
@@ -131,8 +133,8 @@ class KiwiSDRClientBase(object):
     def set_name(self, name):
         self._stream.send_message('SET name=%d' % (name))
 
-    def _set_auth(self, t, p=''):
-        self._stream.send_message('SET auth t=%s p=%s' % (t, p))
+    def _set_auth(self, client_type, password=''):
+        self._stream.send_message('SET auth t=%s p=%s' % (client_type, password))
 
     def _set_ar_ok(self, ar_in, ar_out):
         self._stream.send_message('SET AR OK in=%d out=%d' % (ar_in, ar_out))
@@ -153,6 +155,8 @@ class KiwiSDRClientBase(object):
             raise KiwiTooBusyError('all %s client slots taken' % value)
         if name == 'badp' and value == '1':
             raise KiwiBadPasswordError()
+        if name == 'down':
+            raise KiwiDownError('server is down atm')
         if name == 'audio_rate':
             self._set_ar_ok(int(value), 44100)
         elif name == 'sample_rate':
