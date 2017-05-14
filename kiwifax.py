@@ -134,14 +134,14 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
         self._rows = []
         self._pixel_buffer = array.array('f')
         self._pixels_per_line = 1809
-        self._max_height = 3500
+        self._max_height = 4000
 
         self._new_roll()
         if options.force:
             self._switch_state('printing')
 
     def _switch_state(self, new_state):
-        print "\nSwitching to: %s" % new_state
+        logging.info("Switching to: %s", new_state)
         self._state = new_state
         if new_state == 'idle':
             self._startstop_score = 0
@@ -159,7 +159,7 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
         self.set_agc(True)
 
     def _process_samples(self, seq, samples, rssi):
-        sys.stdout.write('\nBlock: %08x, RSSI: %04d %s' % (seq, rssi, self._state))
+        logging.info('Block: %08x, RSSI: %04d %s', seq, rssi, self._state)
         samples = [ x / 32768.0 for x in samples ]
 
         X = real2complex(samples)
@@ -194,31 +194,33 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
             detect_white = peak_around(P, white_bin, 10) - nf_level >= 10
             detect_black = peak_around(P, black_bin, 10) - nf_level >= 10
             startstop_peak = peak_around(P, startstop_center_bin, 10) - nf_level
-            detect_startstop = startstop_peak >= 10
+            startstop_thresh = 7
+            detect_startstop = startstop_peak >= startstop_thresh
             startstop_peak2 = 0
 
-            if self._state == 'idle':
-                start_peak = max(peak_around(P, startstop_center_bin-64, 10), peak_around(P, startstop_center_bin+64, 10)) - nf_level
-                startstop_peak2 = start_peak
-                self._startstop_adjust(detect_startstop and math.fabs(startstop_peak - start_peak) <= 5)
-                if self._startstop_score > 10:
-                    print "\n\nSTART DETECTED\n"
-                    self._switch_state('starting')
-
-            elif self._state == 'starting':
-                if not detect_startstop:
-                    self._switch_state('phasing')
+            if self._state in ('idle', 'starting'):
+                startstop_peak2 = max(peak_around(P, startstop_center_bin-64, 10), peak_around(P, startstop_center_bin+64, 10)) - nf_level
+                self._startstop_adjust(detect_startstop and math.fabs(startstop_peak - startstop_peak2) <= 5)
+                if self._state == 'idle':
+                    if self._startstop_score > 10:
+                        logging.critical("START DETECTED")
+                        self._switch_state('starting')
+                else:
+                    if self._startstop_score < 3:
+                        self._switch_state('phasing')
 
             elif self._state == 'printing':
-                stop_peak = max(peak_around(P, startstop_center_bin-96, 10), peak_around(P, startstop_center_bin+96, 10)) - nf_level
-                startstop_peak2 = stop_peak
-                self._startstop_adjust(detect_startstop and math.fabs(startstop_peak - stop_peak) <= 5)
+                startstop_peak2 = max(peak_around(P, startstop_center_bin-96, 10), peak_around(P, startstop_center_bin+96, 10)) - nf_level
+                self._startstop_adjust(detect_startstop and math.fabs(startstop_peak - startstop_peak2) <= 5)
                 if self._startstop_score > 10:
-                    print "\n\nSTOP DETECTED\n"
+                    logging.critical("STOP DETECTED")
                     self._flush_rows()
                     self._switch_state('idle')
 
-            sys.stdout.write(" NF=%06.2f X1=%+06.2f X2=%+06.2f SS=%02d %s%s%s" % (nf_level, startstop_peak, startstop_peak2, self._startstop_score, "wW"[detect_white], "bB"[detect_black], "xX"[detect_startstop]))
+            logging.info("NF=%06.2f X1=%+06.2f X2=%+06.2f SS=%02d %s%s%s",
+                nf_level,
+                startstop_peak, startstop_peak2, self._startstop_score,
+                "wW"[detect_white], "bB"[detect_black], "xX"[detect_startstop])
 
     def _new_roll(self):
         self._rows = []
@@ -269,14 +271,14 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
                 s /= phasing_pulse_size
                 if s >= 0.8:
                     self._pixel_buffer = self._pixel_buffer[i + phasing_pulse_size * 3 // 4:]
-                    print "Phasing OK"
+                    logging.info("Phasing OK")
                     self._switch_state('printing')
                     break
                 i += 1
             else:
                 self._pixel_buffer = self._pixel_buffer[max(0, i - phasing_pulse_size):]
             return
-        print "Phasing failed!"
+        logging.error("Phasing failed! Starting anyway")
         self._switch_state('printing')
 
     def _process_row(self, row):
@@ -288,7 +290,7 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
             return
         self._flush_rows()
         if len(self._rows) >= self._max_height:
-            print "Length exceeded; cutting the paper"
+            logging.info("Length exceeded; cutting the paper")
             self._new_roll()
 
     def _flush_rows(self):
@@ -346,6 +348,20 @@ def main():
                       help='Dump block spectra to a CSV file')
 
     (options, unused_args) = parser.parse_args()
+
+    # Setup logging
+    fmtr = logging.Formatter('%(asctime)s %(levelname)s: %(message)s', '%Y%m%dT%H%MZ')
+    fmtr.converter = time.gmtime
+    fh = logging.FileHandler('log_%s_%d_%d.log' % (options.server_host, options.server_port, int(options.frequency * 1000)))
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(fmtr)
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO)
+    ch.setFormatter(fmtr)
+    rootLogger = logging.getLogger()
+    rootLogger.setLevel(logging.INFO)
+    rootLogger.addHandler(fh)
+    rootLogger.addHandler(ch)
 
     while True:
         recorder = KiwiFax(options)

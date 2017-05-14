@@ -1,11 +1,12 @@
 #!/usr/bin/env python
 
-import wsclient
-
 import array
+import logging
 import socket
 import struct
 import time
+
+import wsclient
 
 #
 # IMAADPCM decoder
@@ -129,7 +130,7 @@ class KiwiSDRClientBase(object):
 
     def set_autonotch(self, val):
         self._stream.send_message('SET autonotch=%d' % (val))
-    
+
     def set_name(self, name):
         self._stream.send_message('SET name=%d' % (name))
 
@@ -185,7 +186,7 @@ class KiwiSDRClientBase(object):
 
     def _process_samples(self, seq, samples, rssi):
         pass
-        
+
     def _setup_rx_params(self):
         self._set_mod('am', 100, 2800, 4625.0)
         self._set_agc(True)
