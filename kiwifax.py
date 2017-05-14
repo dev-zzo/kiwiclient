@@ -237,7 +237,7 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
         self._prevX = samples[-1]
         #dump_to_csv(self._output_name + '-discr.csv', detected)
         # Remap the detected region into [0,1)
-        black_thresh, white_thresh = 0.4, 1.0
+        black_thresh, white_thresh = 0.425, 0.95
         pixels = array.array('f', mapper_df_to_intensity(detected, black_thresh, white_thresh))
         # Scale and adjust pixel rate
         samples_per_line = sample_rate * 60.0 / self._lpm
@@ -342,8 +342,8 @@ def main():
                       help='Lines per minute; default: 120.')
     parser.add_option('--sr-coeff', '--sr-coeff',
                       dest='sr_coeff',
-                      type='int', default=0,
-                      help='Sample frequency correction, ppm;')
+                      type='float', default=0,
+                      help='Sample frequency correction, ppm; positive if the lines are too short; negative otherwise')
     parser.add_option('--dump-spectra', '--dump-spectra',
                       dest='dump_spectra',
                       action='store_true', default=False,
@@ -365,8 +365,8 @@ def main():
     rootLogger.addHandler(fh)
     rootLogger.addHandler(ch)
 
-    logger.critical('* * * * * * * *')
-    logger.critical('Logging started')
+    logging.critical('* * * * * * * *')
+    logging.critical('Logging started')
     while True:
         recorder = KiwiFax(options)
 
