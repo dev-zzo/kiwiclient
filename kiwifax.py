@@ -131,6 +131,7 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
         self._prevX = complex(0)
         self._phasing_count = 0
         self._resampler = Interpolator(1.0)
+        self._sf = 1.0 - 1e-6 * options.sr_coeff
         self._rows = []
         self._pixel_buffer = array.array('f')
         self._pixels_per_line = 1809
@@ -200,7 +201,7 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
 
             if self._state in ('idle', 'starting'):
                 startstop_peak2 = max(peak_around(P, startstop_center_bin-64, 10), peak_around(P, startstop_center_bin+64, 10)) - nf_level
-                self._startstop_adjust(detect_startstop and math.fabs(startstop_peak - startstop_peak2) <= 5)
+                self._startstop_adjust(detect_startstop and startstop_peak2 >= startstop_thresh)
                 if self._state == 'idle':
                     if self._startstop_score > 10:
                         logging.critical("START DETECTED")
@@ -211,7 +212,7 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
 
             elif self._state == 'printing':
                 startstop_peak2 = max(peak_around(P, startstop_center_bin-96, 10), peak_around(P, startstop_center_bin+96, 10)) - nf_level
-                self._startstop_adjust(detect_startstop and math.fabs(startstop_peak - startstop_peak2) <= 5)
+                self._startstop_adjust(detect_startstop and startstop_peak2 >= startstop_thresh)
                 if self._startstop_score > 10:
                     logging.critical("STOP DETECTED")
                     self._flush_rows()
@@ -240,7 +241,8 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
         pixels = array.array('f', mapper_df_to_intensity(detected, black_thresh, white_thresh))
         # Scale and adjust pixel rate
         samples_per_line = sample_rate * 60.0 / self._lpm
-        self._resampler.set_factor(samples_per_line / self._pixels_per_line)
+        resample_factor = (samples_per_line / self._pixels_per_line) * self._sf
+        self._resampler.set_factor(resample_factor)
         self._resampler.refill(pixels)
         self._pixel_buffer.extend(self._resampler)
 
@@ -338,10 +340,10 @@ def main():
                       dest='lpm',
                       type='int', default=120,
                       help='Lines per minute; default: 120.')
-    #parser.add_option('--sr-coeff', '--sr-coeff',
-    #                  dest='sr_coeff',
-    #                  type='float', default=1.0,
-    #                  help='Sample frequency correction; increase to make lines shorter, decrease to make lines longer')
+    parser.add_option('--sr-coeff', '--sr-coeff',
+                      dest='sr_coeff',
+                      type='int', default=0,
+                      help='Sample frequency correction, ppm;')
     parser.add_option('--dump-spectra', '--dump-spectra',
                       dest='dump_spectra',
                       action='store_true', default=False,
@@ -363,6 +365,8 @@ def main():
     rootLogger.addHandler(fh)
     rootLogger.addHandler(ch)
 
+    logger.critical('* * * * * * * *')
+    logger.critical('Logging started')
     while True:
         recorder = KiwiFax(options)
 
