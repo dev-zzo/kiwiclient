@@ -126,17 +126,15 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
         self._state = 'idle'
 
         self._startstop_buffer = []
-        self._start_samples = [ False for x in xrange(16) ]
-        self._stop_samples = [ False for x in xrange(16) ]
-        self._startstop_index = 0
+        self._startstop_score = 0
 
         self._prevX = complex(0)
         self._phasing_count = 0
         self._resampler = Interpolator(1.0)
         self._rows = []
         self._pixel_buffer = array.array('f')
-        self._pixels_per_line = 1600
-        self._max_height = 99999
+        self._pixels_per_line = 1809
+        self._max_height = 3500
 
         self._new_roll()
         if options.force:
@@ -145,23 +143,37 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
     def _switch_state(self, new_state):
         print "\nSwitching to: %s" % new_state
         self._state = new_state
-        if new_state == 'starting':
-            self._new_roll()
+        if new_state == 'idle':
+            self._startstop_score = 0
+        elif new_state == 'starting':
+            pass
         elif new_state == 'phasing':
+            self._new_roll()
             self._phasing_count = 0
+        elif new_state == 'printing':
+            self._startstop_score = 0
 
     def _setup_rx_params(self):
-        self.set_mod('usb', 300, 2500, self._options.frequency)
+        #self.set_mod('usb', 300, 2500, self._options.frequency - 1.9)
+        self.set_mod('usb', 1500-1000, 2300+1000, self._options.frequency - 1.9)
         self.set_agc(True)
 
     def _process_samples(self, seq, samples, rssi):
-        sys.stdout.write('\rBlock: %08x, RSSI: %04d %s' % (seq, rssi, self._state))
+        sys.stdout.write('\nBlock: %08x, RSSI: %04d %s' % (seq, rssi, self._state))
         samples = [ x / 32768.0 for x in samples ]
 
         X = real2complex(samples)
         sample_rate = self._sample_rate / 4
         self._process_startstop(X, sample_rate)
         self._process_pixels(X, sample_rate)
+
+    def _startstop_adjust(self, updown):
+        if updown:
+            self._startstop_score += 1
+        else:
+            self._startstop_score -= 2
+            if self._startstop_score < 0:
+                self._startstop_score = 0
 
     def _process_startstop(self, samples, sample_rate):
         window_size = 512
@@ -170,46 +182,43 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
             window = self._startstop_buffer[:window_size]
             self._startstop_buffer = self._startstop_buffer[window_size:]
             P = power_db(dft_complex(window))
-            #if self._state != 'idle':
-            #    dump_to_csv(self._output_name + '-ss.csv', P)
-            if True:
-                nf_level = sorted(P)[len(P) // 2]
-                # TODO: avoid hardcoded bins
-                white_bin = 22
-                black_bin = 193
-                startstop_center_bin = 107
-                detect_white = peak_around(P, white_bin, 5) - nf_level >= 10
-                detect_black = peak_around(P, black_bin, 10) - nf_level >= 10
-                if not detect_white and peak_around(P, startstop_center_bin, 10) - nf_level >= 10:
-                    start_peak = max(peak_around(P, startstop_center_bin-64, 10), peak_around(P, startstop_center_bin+64, 10))
-                    stop_peak = max(peak_around(P, startstop_center_bin-96, 10), peak_around(P, startstop_center_bin+96, 10))
-                    detect_start = start_peak > stop_peak
-                    detect_stop = stop_peak > start_peak
-                else:
-                    detect_start = detect_stop = False
-                sys.stdout.write(" %.2f %s%s%s%s" % (nf_level, "wW"[detect_white], "bB"[detect_black], "sS"[detect_start], "tT"[detect_stop]))
+            if self._options.dump_spectra and self._state != 'idle':
+                dump_to_csv(self._output_name + '-ss.csv', P)
+            # 5dB is added due to empiric observations of the target peak
+            # values being at about +5dB ref the measured noise floor
+            nf_level = sorted(P)[len(P) // 2] + 5
+            # TODO: avoid hardcoded bins
+            white_bin = 22
+            black_bin = 193
+            startstop_center_bin = 107
+            detect_white = peak_around(P, white_bin, 10) - nf_level >= 10
+            detect_black = peak_around(P, black_bin, 10) - nf_level >= 10
+            startstop_peak = peak_around(P, startstop_center_bin, 10) - nf_level
+            detect_startstop = startstop_peak >= 10
+            startstop_peak2 = 0
 
-                self._start_samples[self._startstop_index] = detect_start
-                self._stop_samples[self._startstop_index] = detect_stop
-                self._startstop_index += 1
-                if self._startstop_index >= len(self._start_samples):
-                    self._startstop_index = 0
-                start_detected = popcount_thresh(self._start_samples, len(self._start_samples) * 3 / 4)
-                stop_detected = popcount_thresh(self._stop_samples, len(self._stop_samples) * 3 / 4)
+            if self._state == 'idle':
+                start_peak = max(peak_around(P, startstop_center_bin-64, 10), peak_around(P, startstop_center_bin+64, 10)) - nf_level
+                startstop_peak2 = start_peak
+                self._startstop_adjust(detect_startstop and math.fabs(startstop_peak - start_peak) <= 5)
+                if self._startstop_score > 10:
+                    print "\n\nSTART DETECTED\n"
+                    self._switch_state('starting')
 
-                if start_detected:
-                    if self._state == 'idle':
-                        print "\n\nSTART DETECTED\n"
-                        if self._state == 'printing':
-                            self._flush_rows()
-                        self._switch_state('starting')
-                else:
-                    if self._state == 'starting':
-                        self._switch_state('phasing')
-                if stop_detected and self._state == 'printing':
+            elif self._state == 'starting':
+                if not detect_startstop:
+                    self._switch_state('phasing')
+
+            elif self._state == 'printing':
+                stop_peak = max(peak_around(P, startstop_center_bin-96, 10), peak_around(P, startstop_center_bin+96, 10)) - nf_level
+                startstop_peak2 = stop_peak
+                self._startstop_adjust(detect_startstop and math.fabs(startstop_peak - stop_peak) <= 5)
+                if self._startstop_score > 10:
                     print "\n\nSTOP DETECTED\n"
                     self._flush_rows()
                     self._switch_state('idle')
+
+            sys.stdout.write(" NF=%06.2f X1=%+06.2f X2=%+06.2f SS=%02d %s%s%s" % (nf_level, startstop_peak, startstop_peak2, self._startstop_score, "wW"[detect_white], "bB"[detect_black], "xX"[detect_startstop]))
 
     def _new_roll(self):
         self._rows = []
@@ -225,7 +234,7 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
         self._prevX = samples[-1]
         #dump_to_csv(self._output_name + '-discr.csv', detected)
         # Remap the detected region into [0,1)
-        black_thresh, white_thresh = 0.45, 1.0
+        black_thresh, white_thresh = 0.4, 1.0
         pixels = array.array('f', mapper_df_to_intensity(detected, black_thresh, white_thresh))
         # Scale and adjust pixel rate
         samples_per_line = sample_rate * 60.0 / self._lpm
@@ -250,7 +259,7 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
         if self._phasing_count <= 3:
             self._pixel_buffer = self._pixel_buffer[self._pixels_per_line:]
             return
-        if self._phasing_count <= 25:
+        if self._phasing_count <= 100:
             phasing_pulse_size = 70
             i = 0
             while i + phasing_pulse_size < len(self._pixel_buffer):
@@ -265,7 +274,7 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
                     break
                 i += 1
             else:
-                self._pixel_buffer = self._pixel_buffer[min(0, i - phasing_pulse_size):]
+                self._pixel_buffer = self._pixel_buffer[max(0, i - phasing_pulse_size):]
             return
         print "Phasing failed!"
         self._switch_state('printing')
@@ -285,8 +294,8 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
     def _flush_rows(self):
         if not self._rows:
             return
-        with open(self._output_name + '.png', 'wb') as fp:
-            while True:
+        while True:
+            with open(self._output_name + '.png', 'wb') as fp:
                 try:
                     png.Writer(len(self._rows[0]), len(self._rows), greyscale=True).write(fp, self._rows)
                     break
@@ -297,10 +306,6 @@ def main():
     sys.stdout = codecs.getwriter('utf-8')(sys.stdout)
 
     parser = OptionParser()
-    parser.add_option('--log-level', '--log_level', type='choice',
-                      dest='log_level', default='warn',
-                      choices=['debug', 'info', 'warn', 'error', 'critical'],
-                      help='Log level.')
     parser.add_option('-k', '--socket-timeout', '--socket_timeout',
                       dest='socket_timeout', type='int', default=10,
                       help='Timeout(sec) for sockets')
@@ -314,11 +319,11 @@ def main():
     parser.add_option('-f', '--freq',
                       dest='frequency',
                       type='float',
-                      help='Frequency to tune to, in kHz.')
+                      help='Frequency to tune to, in kHz (will be tuned down by 1.9kHz)')
     parser.add_option('--station', '--station',
                       dest='station',
                       type='string', default=None,
-                      help='Station ID to be appended')
+                      help='Station ID to be appended to file names')
     parser.add_option('-F', '--force-start',
                       dest='force',
                       action='store_true', default=False,
@@ -326,19 +331,21 @@ def main():
     parser.add_option('-i', '--ioc',
                       dest='ioc',
                       type='int', default=576,
-                      help='Index of cooperation.')
+                      help='Index of cooperation; default: 576.')
     parser.add_option('-l', '--lpm',
                       dest='lpm',
                       type='int', default=120,
-                      help='Lines per minute.')
+                      help='Lines per minute; default: 120.')
     #parser.add_option('--sr-coeff', '--sr-coeff',
     #                  dest='sr_coeff',
     #                  type='float', default=1.0,
     #                  help='Sample frequency correction; increase to make lines shorter, decrease to make lines longer')
+    parser.add_option('--dump-spectra', '--dump-spectra',
+                      dest='dump_spectra',
+                      action='store_true', default=False,
+                      help='Dump block spectra to a CSV file')
 
     (options, unused_args) = parser.parse_args()
-
-    logging.basicConfig(level=logging.getLevelName(options.log_level.upper()))
 
     while True:
         recorder = KiwiFax(options)
