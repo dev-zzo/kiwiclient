@@ -284,12 +284,12 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
         for x in row:
             pixels.append(int(clamp(x, 0, 1) * 255))
         self._rows.append(pixels)
-        if len(self._rows) >= self._max_height:
-            print "Length exceeded; cutting the paper"
-            self._new_roll()
         if len(self._rows) % 16:
             return
         self._flush_rows()
+        if len(self._rows) >= self._max_height:
+            print "Length exceeded; cutting the paper"
+            self._new_roll()
 
     def _flush_rows(self):
         if not self._rows:
