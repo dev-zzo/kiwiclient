@@ -306,6 +306,13 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
                 except KeyboardInterrupt:
                     pass
 
+KNOWN_CORRECTION_FACTORS = {
+    'kiwisdr.northlandradio.nz:8073': -10.5,
+    'travelx.org:8073': +7.0,
+    'travelx.org:8074': -10.5,
+    'reute.dyndns-remote.com:8073': -10.5,
+}
+
 def main():
     sys.stdout = codecs.getwriter('utf-8')(sys.stdout)
 
@@ -367,6 +374,14 @@ def main():
 
     logging.critical('* * * * * * * *')
     logging.critical('Logging started')
+
+    if options.sr_coeff == 0:
+        server_identity = '%s:%d' % (options.server_host, options.server_port)
+        known_coeff = KNOWN_CORRECTION_FACTORS.get(server_identity)
+        if known_coeff:
+            options.sr_coeff = known_coeff
+            logging.info('Applying known correction %f for host %s', known_coeff, server_identity)
+
     while True:
         recorder = KiwiFax(options)
 
