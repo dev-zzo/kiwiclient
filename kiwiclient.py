@@ -100,7 +100,7 @@ class KiwiSDRClientBase(object):
         self._socket = socket.socket()
         self._socket.settimeout(self._options.socket_timeout)
         self._socket.connect((host, port))
-        self._prepare_stream(host, port, '/%d/AUD' % int(time.time()))
+        self._prepare_stream(host, port, '/%d/SND' % int(time.time()))
 
     def _prepare_stream(self, host, port, which):
         import mod_pywebsocket.common
@@ -166,7 +166,7 @@ class KiwiSDRClientBase(object):
             self.set_squelch(0, 0)
             self.set_autonotch(0)
             self._set_gen(0, 0)
-            self._server_de('openwebrx.js')
+            # self._server_de('openwebrx.js')
             # Required to get rolling
             self._setup_rx_params()
             # Also send a keepalive
@@ -207,7 +207,7 @@ class KiwiSDRClientBase(object):
                 id, body = received.split(' ', 1)
                 if id == 'MSG':
                     self._process_msg(body)
-                elif id == 'AUD':
+                elif id == 'SND':
                     self._process_aud(body)
                     # Ensure we don't get kicked due to timeouts
                     self._set_keepalive()
