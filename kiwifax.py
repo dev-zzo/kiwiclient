@@ -195,7 +195,7 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
             detect_white = peak_around(P, white_bin, 10) - nf_level >= 10
             detect_black = peak_around(P, black_bin, 10) - nf_level >= 10
             startstop_peak = peak_around(P, startstop_center_bin, 10) - nf_level
-            startstop_thresh = 7
+            startstop_thresh = 5
             detect_startstop = startstop_peak >= startstop_thresh
             startstop_peak2 = 0
 
@@ -307,10 +307,19 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
                     pass
 
 KNOWN_CORRECTION_FACTORS = {
-    'kiwisdr.northlandradio.nz:8073': -10.5,
-    'travelx.org:8073': +7.0,
-    'travelx.org:8074': -10.5,
-    'reute.dyndns-remote.com:8073': -10.5,
+    'kiwisdr.northlandradio.nz:8073': {
+        11030.00: -11.0,
+    },
+    'travelx.org:8073': { # +7.0
+        16971.00: +4.0,
+    },
+    'travelx.org:8074': {
+        7795.00: +2.0,
+        9165.00: -11.0,
+    },
+    'reute.dyndns-remote.com:8073': {
+        7880.00: -11.0,
+    },
 }
 
 def main():
@@ -377,10 +386,13 @@ def main():
 
     if options.sr_coeff == 0:
         server_identity = '%s:%d' % (options.server_host, options.server_port)
-        known_coeff = KNOWN_CORRECTION_FACTORS.get(server_identity)
-        if known_coeff:
+        try:
+            coeffs = KNOWN_CORRECTION_FACTORS[server_identity]
+            known_coeff = coeffs[options.frequency]
             options.sr_coeff = known_coeff
             logging.info('Applying known correction %f for host %s', known_coeff, server_identity)
+        except KeyError:
+            pass
 
     while True:
         recorder = KiwiFax(options)
