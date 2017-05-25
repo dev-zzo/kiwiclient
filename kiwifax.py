@@ -14,8 +14,9 @@ import kiwiclient
 import png
 
 
-# Known bugs:
-# * Start/stop detection doesn't work for 60 RPM
+# Known bugs and missing features:
+# * No automatic LPM detection; useful when a station switches between 60 and 120
+# * No automatic frequency correction yet to tune out small freq errors
 
 
 def dump_to_csv(filename, data):
@@ -46,31 +47,53 @@ def fm_detect(X, prev, angle):
         prev = x
     return vals
 
-def dft_complex(input):
-    width = len(input)
-    output = []
-    w1d = complex(0, -2 * math.pi / width)
-    w1 = 0
-    for k in xrange(width):
-        X = 0
-        w2d = cmath.exp(w1)
-        w2 = complex(1, 0)
-        for n in xrange(width):
-            X += input[n] * w2
-            w2 *= w2d
-        output.append(X)
-        w1 += w1d
+
+def bitreverse_sort(input):
+    output = list(input)
+
+    half_length = len(input) // 2
+    j = half_length
+    for i in xrange(1, len(input) - 1):
+        if i < j:
+            t = output[j]
+            output[j] = output[i]
+            output[i] = t
+        k = half_length
+        while k <= j:
+            j -= k
+            k = k >> 1
+        j += k
+
     return output
+
+def log2(x):
+    return math.frexp(x)[1] - 1
+
+def fft_core(x):
+    length = len(x)
+
+    for l in xrange(1, log2(length) + 1):
+        le = 1 << l
+        le2 = le >> 1
+        w = 2 * math.pi / le
+        s = cmath.exp(complex(0, -w))
+        u = complex(1, 0)
+        for j in xrange(1, le2 + 1):
+            for i in xrange(j - 1, length, le):
+                o = i + le2
+                t = x[o] * u
+                x[o] = x[i] - t
+                x[i] = x[i] + t
+            u *= s
+
+def fft_complex(input):
+    x = bitreverse_sort(input)
+    fft_core(x)
+    return x
 
 def power_db(input):
     return [ 10 * math.log10(abs(x) / len(input)) for x in input ]
 
-def popcount_thresh(X, thresh):
-    count = 0
-    for x in X:
-        if x:
-            count += 1
-    return count >= thresh
 
 def interp_hermite(t, p0, p1, p2, p3):
     c0 = p1
@@ -108,8 +131,16 @@ class Interpolator:
         self._t += self._dt
         return interp_hermite(t_frac, self._buffer[t_int], self._buffer[t_int + 1], self._buffer[t_int + 2], self._buffer[t_int + 3])
 
+
 def peak_around(P, bin, delta):
-    return sorted(P[bin-delta:bin+delta+1])[-1]
+    a = bin - delta
+    b = bin + delta + 1
+    try:
+        return sorted(P[a:b])[-1]
+    except IndexError:
+        print "FAIL"
+        print bin, delta, a, b, len(P)
+        raise
 
 def mapper_df_to_intensity(dfs, black_thresh, white_thresh):
     for x in dfs:
@@ -127,6 +158,7 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
 
         self._startstop_buffer = []
         self._startstop_score = 0
+        self._noise_score = 0
 
         self._prevX = complex(0)
         self._phasing_count = 0
@@ -135,7 +167,8 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
         self._rows = []
         self._pixel_buffer = array.array('f')
         self._pixels_per_line = 1809
-        self._max_height = 4000
+        # NOTE: Kyodo pages are ~5400px
+        self._max_height = 5500
 
         self._new_roll()
         if options.force:
@@ -146,6 +179,7 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
         self._state = new_state
         if new_state == 'idle':
             self._startstop_score = 0
+            self._noise_score = 0
         elif new_state == 'starting':
             pass
         elif new_state == 'phasing':
@@ -153,6 +187,8 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
             self._phasing_count = 0
         elif new_state == 'printing':
             self._startstop_score = 0
+        elif new_state == 'stopping':
+            pass
 
     def _setup_rx_params(self):
         #self.set_mod('usb', 300, 2500, self._options.frequency - 1.9)
@@ -169,59 +205,97 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
         self._process_pixels(X, sample_rate)
 
     def _startstop_adjust(self, updown):
-        if updown:
+        if updown and self._startstop_score < 10:
             self._startstop_score += 1
-        else:
+        elif self._startstop_score > 0:
             self._startstop_score -= 2
             if self._startstop_score < 0:
                 self._startstop_score = 0
 
     def _process_startstop(self, samples, sample_rate):
-        window_size = 512
         self._startstop_buffer.extend(samples)
+        # Snip out a window for start/stop processing
+        # Window size defines the overall size of the window
+        # Window shift defines how many samples are discarded after each iteration
+        # This allows for overlapping FFTs thus increasing temporal resolution
+        window_size = 4096
+        window_shift = window_size / 8
         while len(self._startstop_buffer) >= window_size:
             window = self._startstop_buffer[:window_size]
-            self._startstop_buffer = self._startstop_buffer[window_size:]
-            P = power_db(dft_complex(window))
-            if self._options.dump_spectra and self._state != 'idle':
-                dump_to_csv(self._output_name + '-ss.csv', P)
-            # 5dB is added due to empiric observations of the target peak
-            # values being at about +5dB ref the measured noise floor
-            nf_level = sorted(P)[len(P) // 2] + 5
-            # TODO: avoid hardcoded bins
-            white_bin = 22
-            black_bin = 193
-            startstop_center_bin = 107
-            detect_white = peak_around(P, white_bin, 10) - nf_level >= 10
-            detect_black = peak_around(P, black_bin, 10) - nf_level >= 10
-            startstop_peak = peak_around(P, startstop_center_bin, 10) - nf_level
-            startstop_thresh = 5
-            detect_startstop = startstop_peak >= startstop_thresh
-            startstop_peak2 = 0
+            self._startstop_buffer = self._startstop_buffer[window_shift:]
+            self._process_startstop_piece(window, sample_rate)
 
-            if self._state in ('idle', 'starting'):
-                startstop_peak2 = max(peak_around(P, startstop_center_bin-64, 10), peak_around(P, startstop_center_bin+64, 10)) - nf_level
-                self._startstop_adjust(detect_startstop and startstop_peak2 >= startstop_thresh)
-                if self._state == 'idle':
-                    if self._startstop_score > 10:
-                        logging.critical("START DETECTED")
-                        self._switch_state('starting')
-                else:
-                    if self._startstop_score < 3:
-                        self._switch_state('phasing')
+    def _process_startstop_piece(self, samples, sample_rate):
+        # Compute the power spectrum
+        samples = fft_complex(samples)
+        P = power_db(samples)
+        Psorted = sorted(P)
+        # DUMP POINT
+        if self._options.dump_spectra and self._state != 'idle':
+            dump_to_csv(self._output_name + '-ss.csv', P)
+        # Assume noise floor is the median value + 5dB
+        nf_level = Psorted[len(Psorted) // 2] + 5.0
+        peak_level = Psorted[-1]
+        # Compute the FFT bins where peaks are expected
+        resolution = float(sample_rate) / len(samples)
+        white_bin = int((sample_rate - 2300) / resolution)
+        black_bin = int((sample_rate - 1500) / resolution)
+        startstop_center_bin = int((sample_rate - 1900) / resolution)
+        start576_delta = int(300 / resolution)
+        start288_delta = int(675 / resolution)
+        stop_delta = int(450 / resolution)
+        detect_width = len(samples) // 50
+        # print white_bin, black_bin, startstop_center_bin # , start576_delta, stop_delta, detect_width
+        # peaks = [ (P.index(x), x) for x in Psorted[-5:] ]
+        # print ' '.join([ '%04d:%+05.1f' % x for x in reversed(peaks)])
+        # Detect power level at those bins
+        bw_thresh = 6
+        startstop_thresh = 10
+        detect_white = peak_around(P, white_bin, detect_width) - nf_level >= bw_thresh
+        detect_black = peak_around(P, black_bin, detect_width) - nf_level >= bw_thresh
+        startstop_peak = peak_around(P, startstop_center_bin, detect_width) - nf_level
+        detect_startstop = startstop_peak >= startstop_thresh
+        startstop_peak2 = 0
 
-            elif self._state == 'printing':
-                startstop_peak2 = max(peak_around(P, startstop_center_bin-96, 10), peak_around(P, startstop_center_bin+96, 10)) - nf_level
-                self._startstop_adjust(detect_startstop and startstop_peak2 >= startstop_thresh)
-                if self._startstop_score > 10:
-                    logging.critical("STOP DETECTED")
-                    self._flush_rows()
+        if self._state in ('idle', 'starting'):
+            startstop_delta = start576_delta
+        else:
+            startstop_delta = stop_delta
+        startstop_peak2 = max(peak_around(P, startstop_center_bin-startstop_delta, detect_width), peak_around(P, startstop_center_bin+startstop_delta, detect_width)) - nf_level
+        self._startstop_adjust(detect_startstop and startstop_peak2 >= startstop_thresh)
+
+        logging.info("NF=%05.1f PK=%05.1f X1=%+05.1f X2=%+05.1f SS=%02d NC=%02d %s%s%s",
+            nf_level, peak_level,
+            startstop_peak, startstop_peak2, self._startstop_score, self._noise_score,
+            "wW"[detect_white], "bB"[detect_black], "xX"[detect_startstop])
+        # Decide
+        if self._state == 'idle':
+            if self._startstop_score >= 10:
+                logging.critical("START DETECTED")
+                self._switch_state('starting')
+        elif self._state == 'starting':
+            if self._startstop_score < 3:
+                self._switch_state('phasing')
+        elif self._state == 'printing':
+            if self._startstop_score >= 10:
+                logging.critical("STOP DETECTED")
+                self._switch_state('stopping')
+        elif self._state == 'stopping':
+            if self._startstop_score < 3:
+                self._flush_rows()
+                self._switch_state('idle')
+        # Check if we are listening to noise only
+        # Heuristic: no white or black tones for a while
+        if self._state != 'idle':
+            if not (detect_white or detect_black or detect_startstop):
+                self._noise_score += 1
+                if self._noise_score >= 100:
+                    logging.critical('NOISE ONLY DETECTED')
                     self._switch_state('idle')
-
-            logging.info("NF=%06.2f X1=%+06.2f X2=%+06.2f SS=%02d %s%s%s",
-                nf_level,
-                startstop_peak, startstop_peak2, self._startstop_score,
-                "wW"[detect_white], "bB"[detect_black], "xX"[detect_startstop])
+            else:
+                self._noise_score -= 5
+                if self._noise_score < 0:
+                    self._noise_score = 0
 
     def _new_roll(self):
         self._rows = []
@@ -231,11 +305,10 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
             self._output_name += '_' + self._options.station
 
     def _process_pixels(self, samples, sample_rate):
-        if not self._state in ('phasing', 'printing'):
+        if not self._state in ('phasing', 'printing', 'stopping'):
             return
         detected = fm_detect(samples, self._prevX, -0.1 * math.pi)
         self._prevX = samples[-1]
-        #dump_to_csv(self._output_name + '-discr.csv', detected)
         # Remap the detected region into [0,1)
         black_thresh, white_thresh = 0.425, 0.95
         pixels = array.array('f', mapper_df_to_intensity(detected, black_thresh, white_thresh))
@@ -252,8 +325,7 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
             # Cut into rows of pixels
             while len(self._pixel_buffer) >= self._pixels_per_line:
                 row = self._pixel_buffer[:self._pixels_per_line]
-                new_buffer = self._pixel_buffer[self._pixels_per_line:]
-                self._pixel_buffer = new_buffer
+                self._pixel_buffer = self._pixel_buffer[self._pixels_per_line:]
                 self._process_row(row)
 
     def _process_phasing(self):
@@ -263,25 +335,26 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
         if self._phasing_count <= 3:
             self._pixel_buffer = self._pixel_buffer[self._pixels_per_line:]
             return
-        if self._phasing_count <= 100:
-            phasing_pulse_size = 70
-            i = 0
-            while i + phasing_pulse_size < len(self._pixel_buffer):
-                s = 0
-                for j in xrange(i, i + phasing_pulse_size):
-                    s += clamp(self._pixel_buffer[j], 0, 1)
-                s /= phasing_pulse_size
-                if s >= 0.8:
-                    self._pixel_buffer = self._pixel_buffer[i + phasing_pulse_size * 3 // 4:]
-                    logging.info("Phasing OK")
-                    self._switch_state('printing')
-                    break
-                i += 1
-            else:
-                self._pixel_buffer = self._pixel_buffer[max(0, i - phasing_pulse_size):]
+        if self._phasing_count >= 100:
+            logging.error("Phasing failed! Starting anyway")
+            self._switch_state('printing')
             return
-        logging.error("Phasing failed! Starting anyway")
-        self._switch_state('printing')
+        # Do a moving average of the pixel intensity
+        phasing_pulse_size = 70
+        i = 0
+        while i + phasing_pulse_size < len(self._pixel_buffer):
+            s = 0
+            for j in xrange(i, i + phasing_pulse_size):
+                s += clamp(self._pixel_buffer[j], 0, 1)
+            s /= phasing_pulse_size
+            if s >= 0.85:
+                self._pixel_buffer = self._pixel_buffer[i + phasing_pulse_size * 3 // 4:]
+                logging.info("Phasing OK")
+                self._switch_state('printing')
+                break
+            i += 1
+        else:
+            self._pixel_buffer = self._pixel_buffer[max(0, i - phasing_pulse_size):]
 
     def _process_row(self, row):
         pixels = array.array('B')
@@ -311,6 +384,8 @@ KNOWN_CORRECTION_FACTORS = {
         11030.00: -11.0,
     },
     'travelx.org:8073': { # +7.0
+        7795.00: +3.0,
+        9165.00: -5.0,
         16971.00: +4.0,
     },
     'travelx.org:8074': {
