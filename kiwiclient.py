@@ -147,9 +147,6 @@ class KiwiSDRClientBase(object):
     def _set_keepalive(self):
         self._stream.send_message('SET keepalive')
 
-    def _server_de(self, client):
-        self._stream.send_message('SERVER DE CLIENT %s AUD' % (client))
-
     def _process_msg_param(self, name, value):
         print "%s: %s" % (name, value)
         if name == 'too_busy':
@@ -166,7 +163,6 @@ class KiwiSDRClientBase(object):
             self.set_squelch(0, 0)
             self.set_autonotch(0)
             self._set_gen(0, 0)
-            # self._server_de('openwebrx.js')
             # Required to get rolling
             self._setup_rx_params()
             # Also send a keepalive
