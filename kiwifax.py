@@ -16,7 +16,7 @@ import png
 
 # Known bugs and missing features:
 # * No automatic LPM detection; useful when a station switches between 60 and 120
-# * No automatic frequency correction yet to tune out small freq errors
+# * Challanged to tell start from stop when harmonics are present
 
 
 def dump_to_csv(filename, data):
@@ -135,12 +135,31 @@ class Interpolator:
 def peak_around(P, bin, delta):
     a = bin - delta
     b = bin + delta + 1
+    section = P[a:b]
     try:
-        return sorted(P[a:b])[-1]
+        return sorted(section)[-1]
     except IndexError:
         print "FAIL"
         print bin, delta, a, b, len(P)
         raise
+
+def peak_detect(data, thresh):
+    data = array.array('f', data)
+    peak_radius = 50
+    peaks = []
+    while True:
+        peak_index = 0
+        peak_value = data[peak_index]
+        for i in xrange(1, len(data)):
+            if peak_value < data[i]:
+                peak_value = data[i]
+                peak_index = i
+        if peak_value < thresh:
+            break
+        peaks.append((peak_index, peak_value))
+        for i in xrange(max(peak_index - peak_radius, 0), min(peak_index + peak_radius + 1, len(data))):
+            data[i] = -999
+    return peaks
 
 def mapper_df_to_intensity(dfs, black_thresh, white_thresh):
     for x in dfs:
@@ -156,6 +175,8 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
 
         self._state = 'idle'
 
+        self._tuning_offset = 0
+        self._ss_window_size = 4096
         self._startstop_buffer = []
         self._startstop_score = 0
         self._noise_score = 0
@@ -163,7 +184,7 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
         self._prevX = complex(0)
         self._phasing_count = 0
         self._resampler = Interpolator(1.0)
-        self._sf = 1.0 - 1e-6 * options.sr_coeff
+        self._line_scale_factor = 1.0 - 1e-6 * options.sr_coeff
         self._rows = []
         self._pixel_buffer = array.array('f')
         self._pixels_per_line = 1809
@@ -195,6 +216,24 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
         self.set_mod('usb', 1500-1000, 2300+1000, self._options.frequency - 1.9)
         self.set_agc(True)
 
+    def _on_sample_rate_change(self):
+        # Precompute everything that depends on the SR
+        sample_rate = self._sample_rate / 4
+        # Start/stop detection params
+        resolution = float(sample_rate) / self._ss_window_size
+        self._bin_size = resolution
+        self._white_bin = int((sample_rate - 2300) / resolution)
+        self._black_bin = int((sample_rate - 1500) / resolution)
+        self._startstop_center_bin = int((sample_rate - 1900) / resolution)
+        self._start576_delta = int(300 / resolution)
+        self._start288_delta = int(675 / resolution)
+        self._stop_delta = int(450 / resolution)
+        # Pixel output params
+        samples_per_line = sample_rate * 60.0 / self._lpm
+        resample_factor = (samples_per_line / self._pixels_per_line) * self._line_scale_factor
+        self._resampler.set_factor(resample_factor)
+        pass
+
     def _process_samples(self, seq, samples, rssi):
         logging.info('Block: %08x, RSSI: %04d %s', seq, rssi, self._state)
         samples = [ x / 32768.0 for x in samples ]
@@ -202,11 +241,12 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
         X = real2complex(samples)
         sample_rate = self._sample_rate / 4
         self._process_startstop(X, sample_rate)
-        self._process_pixels(X, sample_rate)
+        self._process_pixels(X)
 
     def _startstop_adjust(self, updown):
-        if updown and self._startstop_score < 10:
-            self._startstop_score += 1
+        if updown:
+            if self._startstop_score < 10:
+                self._startstop_score += 1
         elif self._startstop_score > 0:
             self._startstop_score -= 2
             if self._startstop_score < 0:
@@ -218,10 +258,9 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
         # Window size defines the overall size of the window
         # Window shift defines how many samples are discarded after each iteration
         # This allows for overlapping FFTs thus increasing temporal resolution
-        window_size = 4096
-        window_shift = window_size / 8
-        while len(self._startstop_buffer) >= window_size:
-            window = self._startstop_buffer[:window_size]
+        window_shift = self._ss_window_size / 8
+        while len(self._startstop_buffer) >= self._ss_window_size:
+            window = self._startstop_buffer[:self._ss_window_size]
             self._startstop_buffer = self._startstop_buffer[window_shift:]
             self._process_startstop_piece(window, sample_rate)
 
@@ -235,39 +274,37 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
             dump_to_csv(self._output_name + '-ss.csv', P)
         # Assume noise floor is the median value + 5dB
         nf_level = Psorted[len(Psorted) // 2] + 5.0
-        peak_level = Psorted[-1]
-        # Compute the FFT bins where peaks are expected
-        resolution = float(sample_rate) / len(samples)
-        white_bin = int((sample_rate - 2300) / resolution)
-        black_bin = int((sample_rate - 1500) / resolution)
-        startstop_center_bin = int((sample_rate - 1900) / resolution)
-        start576_delta = int(300 / resolution)
-        start288_delta = int(675 / resolution)
-        stop_delta = int(450 / resolution)
-        detect_width = len(samples) // 50
-        # print white_bin, black_bin, startstop_center_bin # , start576_delta, stop_delta, detect_width
-        # peaks = [ (P.index(x), x) for x in Psorted[-5:] ]
-        # print ' '.join([ '%04d:%+05.1f' % x for x in reversed(peaks)])
-        # Detect power level at those bins
-        bw_thresh = 6
-        startstop_thresh = 10
-        detect_white = peak_around(P, white_bin, detect_width) - nf_level >= bw_thresh
-        detect_black = peak_around(P, black_bin, detect_width) - nf_level >= bw_thresh
-        startstop_peak = peak_around(P, startstop_center_bin, detect_width) - nf_level
-        detect_startstop = startstop_peak >= startstop_thresh
-        startstop_peak2 = 0
-
+        peaks = peak_detect(P, nf_level + 10)
+        logging.info(' '.join([ '%04d:%+05.1f' % (x[0] + self._tuning_offset, x[1]) for x in peaks ]))
+        # For each peak, test if it's the one around the start/stop middle freq
+        # For 4096-wide FFT: W=170 B=1536 S=853
+        detect_width = self._ss_window_size // 45
+        detect_startstop = False
+        detect_start576 = False
+        detect_stop = False
+        for peak_bin, peak_power in peaks:
+            peak_bin_relative = peak_bin + self._tuning_offset - self._startstop_center_bin
+            if math.fabs(peak_bin_relative) < detect_width:
+                if self._state in ('idle', 'starting'):
+                    self._tuning_offset = self._startstop_center_bin - peak_bin
+                detect_startstop = True
+            elif math.fabs(peak_bin_relative - self._stop_delta) < detect_width:
+                detect_stop = True
+            elif math.fabs(peak_bin_relative + self._stop_delta) < detect_width:
+                detect_stop = True
+            elif math.fabs(peak_bin_relative - self._start576_delta) < detect_width:
+                detect_start576 = True
+            elif math.fabs(peak_bin_relative + self._start576_delta) < detect_width:
+                detect_start576 = True
         if self._state in ('idle', 'starting'):
-            startstop_delta = start576_delta
+            self._startstop_adjust(detect_startstop and detect_start576)
         else:
-            startstop_delta = stop_delta
-        startstop_peak2 = max(peak_around(P, startstop_center_bin-startstop_delta, detect_width), peak_around(P, startstop_center_bin+startstop_delta, detect_width)) - nf_level
-        self._startstop_adjust(detect_startstop and startstop_peak2 >= startstop_thresh)
+            self._startstop_adjust(detect_startstop and detect_stop)
 
-        logging.info("NF=%05.1f PK=%05.1f X1=%+05.1f X2=%+05.1f SS=%02d NC=%02d %s%s%s",
-            nf_level, peak_level,
-            startstop_peak, startstop_peak2, self._startstop_score, self._noise_score,
-            "wW"[detect_white], "bB"[detect_black], "xX"[detect_startstop])
+        logging.info("NF=%05.1f TO=%+04d/%+06.2fHz SS=%02d NC=%02d %s%s%s",
+            nf_level, self._tuning_offset, self._tuning_offset * self._bin_size,
+            self._startstop_score, self._noise_score,
+            "sS"[detect_startstop], '-5'[detect_start576], "xX"[detect_stop])
         # Decide
         if self._state == 'idle':
             if self._startstop_score >= 10:
@@ -286,7 +323,7 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
                 self._switch_state('idle')
         # Check if we are listening to noise only
         # Heuristic: no white or black tones for a while
-        if self._state != 'idle':
+        if False and self._state != 'idle':
             if not (detect_white or detect_black or detect_startstop):
                 self._noise_score += 1
                 if self._noise_score >= 100:
@@ -304,18 +341,17 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
         if self._options.station:
             self._output_name += '_' + self._options.station
 
-    def _process_pixels(self, samples, sample_rate):
+    def _process_pixels(self, samples):
         if not self._state in ('phasing', 'printing', 'stopping'):
             return
         detected = fm_detect(samples, self._prevX, -0.1 * math.pi)
         self._prevX = samples[-1]
         # Remap the detected region into [0,1)
-        black_thresh, white_thresh = 0.425, 0.95
-        pixels = array.array('f', mapper_df_to_intensity(detected, black_thresh, white_thresh))
+        # TODO: Figure out the best way to go from Hz to fractions there
+        correction = self._tuning_offset * self._bin_size / 1200
+        black_thresh, white_thresh = 0.45, 0.95
+        pixels = array.array('f', mapper_df_to_intensity(detected, black_thresh+correction, white_thresh+correction))
         # Scale and adjust pixel rate
-        samples_per_line = sample_rate * 60.0 / self._lpm
-        resample_factor = (samples_per_line / self._pixels_per_line) * self._sf
-        self._resampler.set_factor(resample_factor)
         self._resampler.refill(pixels)
         self._pixel_buffer.extend(self._resampler)
 
@@ -386,14 +422,15 @@ KNOWN_CORRECTION_FACTORS = {
     'travelx.org:8073': { # +7.0
         7795.00: +3.0,
         9165.00: -5.0,
+        13988.50: +3.0,
         16971.00: +4.0,
     },
     'travelx.org:8074': {
-        7795.00: +2.0,
+        7795.00: +0.0,
         9165.00: -11.0,
     },
     'reute.dyndns-remote.com:8073': {
-        7880.00: -11.0,
+        7880.00: -13.0,
     },
 }
 

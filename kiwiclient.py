@@ -159,6 +159,7 @@ class KiwiSDRClientBase(object):
             self._set_ar_ok(int(value), 44100)
         elif name == 'sample_rate':
             self._sample_rate = float(value)
+            self._on_sample_rate_change()
             # Optional, but is it?..
             self.set_squelch(0, 0)
             self.set_autonotch(0)
@@ -179,6 +180,9 @@ class KiwiSDRClientBase(object):
         data = body[6:]
         rssi = (smeter & 0x0FFF) // 10 - 127
         self._process_samples(seq, self._decoder.decode(data), rssi)
+
+    def _on_sample_rate_change(self):
+        pass
 
     def _process_samples(self, seq, samples, rssi):
         pass
