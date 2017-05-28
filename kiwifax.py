@@ -92,7 +92,8 @@ def fft_complex(input):
     return x
 
 def power_db(input):
-    return [ 10 * math.log10(abs(x) / len(input)) for x in input ]
+    nf = 1.0 / len(input)
+    return [ 10 * math.log10(abs(x) * nf) for x in input ]
 
 
 def interp_hermite(t, p0, p1, p2, p3):
@@ -176,6 +177,7 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
         self._state = 'idle'
 
         self._tuning_offset = 0
+        self._tuning_offset_valid = False
         self._ss_window_size = 4096
         self._startstop_buffer = []
         self._startstop_score = 0
@@ -202,6 +204,7 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
             self._startstop_score = 0
             self._noise_score = 0
         elif new_state == 'starting':
+            self._tuning_offset_valid = True
             pass
         elif new_state == 'phasing':
             self._new_roll()
@@ -274,37 +277,54 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
             dump_to_csv(self._output_name + '-ss.csv', P)
         # Assume noise floor is the median value + 5dB
         nf_level = Psorted[len(Psorted) // 2] + 5.0
+        pk_level = Psorted[-1]
         peaks = peak_detect(P, nf_level + 10)
-        logging.info(' '.join([ '%04d:%+05.1f' % (x[0] + self._tuning_offset, x[1]) for x in peaks ]))
+        logging.info("Peaks: [%s]", ' '.join([ '%04d:%+05.1f' % (x[0] + self._tuning_offset, x[1]) for x in peaks ]))
         # For each peak, test if it's the one around the start/stop middle freq
         # For 4096-wide FFT: W=170 B=1536 S=853
-        detect_width = self._ss_window_size // 45
         detect_startstop = False
-        detect_start576 = False
-        detect_stop = False
+        detect_start576L = False
+        detect_start576H = False
+        detect_stopL = False
+        detect_stopH = False
+        # If no tuning offset correction was performed before,
+        # make sure it is wide enough to capture the peaks
+        if self._tuning_offset_valid:
+            detect_width = self._ss_window_size // 45
+        else:
+            detect_width = self._ss_window_size // 35
         for peak_bin, peak_power in peaks:
-            peak_bin_relative = peak_bin + self._tuning_offset - self._startstop_center_bin
+            # Correct and ensure wraparound is applied
+            peak_bin_relative = peak_bin + self._tuning_offset
+            while peak_bin_relative >= self._ss_window_size:
+                peak_bin_relative -= self._ss_window_size
+            while peak_bin_relative < 0:
+                peak_bin_relative += self._ss_window_size
+            # Shift to the center peak location
+            peak_bin_relative -= self._startstop_center_bin
             if math.fabs(peak_bin_relative) < detect_width:
                 if self._state in ('idle', 'starting'):
                     self._tuning_offset = self._startstop_center_bin - peak_bin
                 detect_startstop = True
             elif math.fabs(peak_bin_relative - self._stop_delta) < detect_width:
-                detect_stop = True
+                detect_stopL = True
             elif math.fabs(peak_bin_relative + self._stop_delta) < detect_width:
-                detect_stop = True
+                detect_stopH = True
             elif math.fabs(peak_bin_relative - self._start576_delta) < detect_width:
-                detect_start576 = True
+                detect_start576L = True
             elif math.fabs(peak_bin_relative + self._start576_delta) < detect_width:
-                detect_start576 = True
+                detect_start576H = True
+        detect_start576 = detect_start576L and detect_start576H
+        detect_stop = detect_stopL and detect_stopH
         if self._state in ('idle', 'starting'):
             self._startstop_adjust(detect_startstop and detect_start576)
         else:
             self._startstop_adjust(detect_startstop and detect_stop)
 
-        logging.info("NF=%05.1f TO=%+04d/%+06.2fHz SS=%02d NC=%02d %s%s%s",
-            nf_level, self._tuning_offset, self._tuning_offset * self._bin_size,
+        logging.info("NF=%05.1f PK=%05.1f  TO=%+04d/%+06.2fHz SS=%02d NC=%02d %s%s%s%s%s",
+            nf_level, pk_level, self._tuning_offset, self._tuning_offset * self._bin_size,
             self._startstop_score, self._noise_score,
-            "sS"[detect_startstop], '-5'[detect_start576], "xX"[detect_stop])
+            "sS"[detect_startstop], '-5'[detect_start576L], '-5'[detect_start576H], "xX"[detect_stopL], "xX"[detect_stopH])
         # Decide
         if self._state == 'idle':
             if self._startstop_score >= 10:
@@ -346,9 +366,15 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
             return
         detected = fm_detect(samples, self._prevX, -0.1 * math.pi)
         self._prevX = samples[-1]
+        # DUMP POINT
+        if self._options.dump_pixels:
+            dump_to_csv(self._output_name + '-px.csv', detected)
         # Remap the detected region into [0,1)
         # TODO: Figure out the best way to go from Hz to fractions there
-        correction = self._tuning_offset * self._bin_size / 1200
+        # Black: average 0.355, very strong HF component?
+        # White: average 1.01
+        # Noise margins +- 0.05
+        correction = 0 # self._tuning_offset * self._bin_size / 1200
         black_thresh, white_thresh = 0.45, 0.95
         pixels = array.array('f', mapper_df_to_intensity(detected, black_thresh+correction, white_thresh+correction))
         # Scale and adjust pixel rate
@@ -432,6 +458,9 @@ KNOWN_CORRECTION_FACTORS = {
     'reute.dyndns-remote.com:8073': {
         7880.00: -13.0,
     },
+    'sarloutca.ddns.net:8073': {
+        7880.00: -7.0,
+    },
 }
 
 def main():
@@ -476,6 +505,10 @@ def main():
                       dest='dump_spectra',
                       action='store_true', default=False,
                       help='Dump block spectra to a CSV file')
+    parser.add_option('--dump-pixels', '--dump-pixels',
+                      dest='dump_pixels',
+                      action='store_true', default=False,
+                      help='Dump row pixels to a CSV file')
 
     (options, unused_args) = parser.parse_args()
 
