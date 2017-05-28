@@ -95,6 +95,8 @@ class KiwiSDRClientBase(object):
     def __init__(self):
         self._socket = None
         self._sample_rate = None
+        self._version_major = None
+        self._version_minor = None
 
     def connect(self, host, port):
         self._socket = socket.socket()
@@ -149,12 +151,14 @@ class KiwiSDRClientBase(object):
 
     def _process_msg_param(self, name, value):
         print "%s: %s" % (name, value)
+        # Handle error conditions
         if name == 'too_busy':
             raise KiwiTooBusyError('all %s client slots taken' % value)
         if name == 'badp' and value == '1':
             raise KiwiBadPasswordError()
         if name == 'down':
             raise KiwiDownError('server is down atm')
+        # Handle data items
         if name == 'audio_rate':
             self._set_ar_ok(int(value), 44100)
         elif name == 'sample_rate':
@@ -168,6 +172,14 @@ class KiwiSDRClientBase(object):
             self._setup_rx_params()
             # Also send a keepalive
             self._set_keepalive()
+        elif name == 'version_maj':
+            self._version_major = value
+            if self._version_major is not None and self._version_minor is not None:
+                logging.info("Server version: %s.%s", self._version_major, self._version_minor)
+        elif name == 'version_min':
+            self._version_minor = value
+            if self._version_major is not None and self._version_minor is not None:
+                logging.info("Server version: %s.%s", self._version_major, self._version_minor)
 
     def _process_msg(self, body):
         for pair in body.split(' '):
