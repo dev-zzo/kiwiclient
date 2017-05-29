@@ -16,7 +16,6 @@ import png
 
 # Known bugs and missing features:
 # * No automatic LPM detection; useful when a station switches between 60 and 120
-# * Challanged to tell start from stop when harmonics are present
 
 
 def dump_to_csv(filename, data):
@@ -36,9 +35,6 @@ def clamp(x, xmin, xmax):
 def norm_clamp(x, xmin, xmax):
     return (clamp(x, xmin, xmax) - xmin) / (xmax - xmin)
 
-def real2complex(x):
-    return [ complex(x[i+0]-x[i+2], x[i+1]-x[i+3]) for i in xrange(0, len(x), 4) ]
-
 def fm_detect(X, prev, angle):
     angle_coeff = cmath.rect(1, angle)
     vals = array.array('f')
@@ -47,6 +43,39 @@ def fm_detect(X, prev, angle):
         prev = x
     return vals
 
+
+def dft_complex(input):
+    width = len(input)
+    output = []
+    w1d = complex(0, -2 * math.pi / width)
+    w1 = 0
+    for k in xrange(width):
+        X = 0
+        w2d = cmath.exp(w1)
+        w2 = complex(1, 0)
+        for n in xrange(width):
+            X += input[n] * w2
+            w2 *= w2d
+        output.append(X)
+        w1 += w1d
+    return output
+
+def idft_complex(input):
+    width = len(input)
+    width_inv = 1.0 / width
+    output = []
+    w1d = complex(0, 2 * math.pi / width)
+    w1 = 0
+    for n in xrange(width):
+        X = 0
+        w2d = cmath.exp(w1)
+        w2 = complex(1, 0)
+        for k in xrange(width):
+            X += input[k] * w2
+            w2 *= w2d
+        output.append(X * width_inv)
+        w1 += w1d
+    return output
 
 def bitreverse_sort(input):
     output = list(input)
@@ -91,58 +120,18 @@ def fft_complex(input):
     fft_core(x)
     return x
 
+def ifft_complex(input):
+    "Computes an inverse FFT transform for complex-valued input"
+    x = bitreverse_sort(input)
+    x = [ v.conjugate() for v in x ]
+    fft_core(x)
+    n_inv = 1.0 / len(x)
+    x = [ v.conjugate() * n_inv for v in x ]
+    return x
+
 def power_db(input):
     nf = 1.0 / len(input)
     return [ 10 * math.log10(abs(x) * nf) for x in input ]
-
-
-def interp_hermite(t, p0, p1, p2, p3):
-    c0 = p1
-    c1 = 0.5 * (p2 - p0)
-    c2 = p0 - 2.5 * p1 + 2 * p2 - 0.5 * p3
-    c3 = 0.5 * (p3 - p0) + 1.5 * (p1 - p2)
-    return c0 + (t * (c1 + (t * (c2 + (t * c3)))))
-
-class Interpolator:
-    def __init__(self, factor):
-        self._buffer = array.array('f')
-        self._t = 0
-        self.set_factor(factor)
-    def set_factor(self, factor):
-        self._dt = factor
-    def refill(self, samples):
-        for x in samples:
-            self._buffer.append(float(x))
-    def _flush(self):
-        t_int = math.trunc(self._t)
-        t_new = min(t_int, len(self._buffer))
-        # print "flush", t_int, t_new
-        if t_new > 0:
-            self._t -= t_new
-            self._buffer = self._buffer[t_new:]
-    def __iter__(self):
-        return self
-    def next(self):
-        t_int = math.trunc(self._t)
-        t_frac = self._t - t_int
-        # print "pop", t_int, t_frac, len(self._buffer)
-        if t_int + 3 >= len(self._buffer):
-            self._flush()
-            raise StopIteration()
-        self._t += self._dt
-        return interp_hermite(t_frac, self._buffer[t_int], self._buffer[t_int + 1], self._buffer[t_int + 2], self._buffer[t_int + 3])
-
-
-def peak_around(P, bin, delta):
-    a = bin - delta
-    b = bin + delta + 1
-    section = P[a:b]
-    try:
-        return sorted(section)[-1]
-    except IndexError:
-        print "FAIL"
-        print bin, delta, a, b, len(P)
-        raise
 
 def peak_detect(data, thresh):
     data = array.array('f', data)
@@ -162,10 +151,99 @@ def peak_detect(data, thresh):
             data[i] = -999
     return peaks
 
+
+class IQConverterDumb:
+    def __init__(self, sample_rate):
+        self.sample_rate = sample_rate / 4
+    def convert(self, samples):
+        if len(samples) % 4:
+            raise ValueError("sample block length must be a multiple of 4")
+        return [ complex(samples[i+0]-samples[i+2], samples[i+1]-samples[i+3]) for i in xrange(0, len(samples), 4) ]
+
+class IQConverterFFT:
+    def __init__(self, sample_rate):
+        self.sample_rate = sample_rate
+    def convert(self, samples):
+        X = fft_complex([ complex(x) for x in samples ])
+        w = 1 + len(X) // 2
+        Y = []
+        for i in xrange(0, w):
+            Y.append(X[i])
+        for i in xrange(w, len(X)):
+            Y.append(complex(1e-6))
+        return ifft_complex(Y)
+
+
+def interp_hermite(t, p0, p1, p2, p3):
+    c0 = p1
+    c1 = 0.5 * (p2 - p0)
+    c2 = p0 - 2.5 * p1 + 2 * p2 - 0.5 * p3
+    c3 = 0.5 * (p3 - p0) + 1.5 * (p1 - p2)
+    return c0 + (t * (c1 + (t * (c2 + (t * c3)))))
+
+class Interpolator:
+    def __init__(self, factor):
+        self._buffer = array.array('f')
+        self._t = 0
+        self.set_factor(factor)
+    def set_factor(self, factor):
+        self._dt = factor
+    def refill(self, samples):
+        for x in samples:
+            self._buffer.append(float(x))
+    def __iter__(self):
+        return self
+    def next(self):
+        t_int = math.trunc(self._t)
+        t_frac = self._t - t_int
+        # print "pop", t_int, t_frac, len(self._buffer)
+        if t_int + 3 >= len(self._buffer):
+            self._flush()
+            raise StopIteration()
+        self._t += self._dt
+        return interp_hermite(t_frac, self._buffer[t_int], self._buffer[t_int + 1], self._buffer[t_int + 2], self._buffer[t_int + 3])
+    def _flush(self):
+        t_int = math.trunc(self._t)
+        t_new = min(t_int, len(self._buffer))
+        # print "flush", t_int, t_new
+        if t_new > 0:
+            self._t -= t_new
+            self._buffer = self._buffer[t_new:]
+
+
 def mapper_df_to_intensity(dfs, black_thresh, white_thresh):
     for x in dfs:
-        yield norm_clamp(x, black_thresh, white_thresh)
+        yield 1 - norm_clamp(x, black_thresh, white_thresh)
 
+
+class Averager:
+    def __init__(self):
+        self._buffer = array.array('f')
+        self._i = 0
+    def refill(self, samples):
+        for x in samples:
+            self._buffer.append(float(x))
+    def __iter__(self):
+        return self
+    def next(self):
+        i = self._i
+        if i + 2 >= len(self._buffer):
+            self._flush()
+            raise StopIteration()
+        x = (self._buffer[i+0] + self._buffer[i+1] + self._buffer[i+2]) / 3
+        self._i = i + 1
+        return x
+    def _flush(self):
+        self._buffer = self._buffer[self._i:]
+        self._i = 0
+
+# Let them have a name
+RADIOFAX_WHITE_FREQ = 2300
+RADIOFAX_BLACK_FREQ = 1500
+RADIOFAX_STARTSTOP_FREQ = 1900
+RADIOFAX_IOC576_START_TONE = 300
+RADIOFAX_IOC288_START_TONE = 675
+RADIOFAX_STOP_TONE = 450
 
 class KiwiFax(kiwiclient.KiwiSDRClientBase):
     def __init__(self, options):
@@ -176,6 +254,7 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
 
         self._state = 'idle'
 
+        self._iqconverter = None
         self._tuning_offset = 0
         self._tuning_offset_valid = False
         self._ss_window_size = 4096
@@ -186,6 +265,7 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
         self._prevX = complex(0)
         self._phasing_count = 0
         self._resampler = Interpolator(1.0)
+        self._averager = Averager()
         self._line_scale_factor = 1.0 - 1e-6 * options.sr_coeff
         self._rows = []
         self._pixel_buffer = array.array('f')
@@ -215,35 +295,36 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
             pass
 
     def _setup_rx_params(self):
-        #self.set_mod('usb', 300, 2500, self._options.frequency - 1.9)
-        self.set_mod('usb', 1500-1000, 2300+1000, self._options.frequency - 1.9)
+        self.set_mod('usb', RADIOFAX_BLACK_FREQ-1000, RADIOFAX_WHITE_FREQ+1000, self._options.frequency - 1.9)
         self.set_agc(True)
 
     def _on_sample_rate_change(self):
         # Precompute everything that depends on the SR
-        sample_rate = self._sample_rate / 4
+        self._iqconverter = IQConverterFFT(self._sample_rate)
+        sample_rate = self._iqconverter.sample_rate
         # Start/stop detection params
         resolution = float(sample_rate) / self._ss_window_size
         self._bin_size = resolution
-        self._white_bin = int((sample_rate - 2300) / resolution)
-        self._black_bin = int((sample_rate - 1500) / resolution)
-        self._startstop_center_bin = int((sample_rate - 1900) / resolution)
-        self._start576_delta = int(300 / resolution)
-        self._start288_delta = int(675 / resolution)
-        self._stop_delta = int(450 / resolution)
+        self._white_bin = int(RADIOFAX_WHITE_FREQ / resolution)
+        self._black_bin = int(RADIOFAX_BLACK_FREQ / resolution)
+        self._startstop_center_bin = int(RADIOFAX_STARTSTOP_FREQ / resolution)
+        self._start576_delta = int(RADIOFAX_IOC576_START_TONE / resolution)
+        self._start288_delta = int(RADIOFAX_IOC288_START_TONE / resolution)
+        self._stop_delta = int(RADIOFAX_STOP_TONE / resolution)
+        self._ss_width = int(0.5 * (RADIOFAX_WHITE_FREQ - RADIOFAX_STARTSTOP_FREQ) / resolution)
+        self._ss_tone_width = int(0.5 * (RADIOFAX_STOP_TONE - RADIOFAX_IOC576_START_TONE) / resolution)
         # Pixel output params
         samples_per_line = sample_rate * 60.0 / self._lpm
         resample_factor = (samples_per_line / self._pixels_per_line) * self._line_scale_factor
         self._resampler.set_factor(resample_factor)
-        pass
+        logging.info("Resampling factor: %f", resample_factor)
 
     def _process_samples(self, seq, samples, rssi):
         logging.info('Block: %08x, RSSI: %04d %s', seq, rssi, self._state)
         samples = [ x / 32768.0 for x in samples ]
 
-        X = real2complex(samples)
-        sample_rate = self._sample_rate / 4
-        self._process_startstop(X, sample_rate)
+        X = self._iqconverter.convert(samples)
+        self._process_startstop(X)
         self._process_pixels(X)
 
     def _startstop_adjust(self, updown):
@@ -255,71 +336,64 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
             if self._startstop_score < 0:
                 self._startstop_score = 0
 
-    def _process_startstop(self, samples, sample_rate):
+    def _process_startstop(self, samples):
         self._startstop_buffer.extend(samples)
         # Snip out a window for start/stop processing
         # Window size defines the overall size of the window
         # Window shift defines how many samples are discarded after each iteration
         # This allows for overlapping FFTs thus increasing temporal resolution
-        window_shift = self._ss_window_size / 8
+        window_shift = self._ss_window_size / 2
         while len(self._startstop_buffer) >= self._ss_window_size:
             window = self._startstop_buffer[:self._ss_window_size]
             self._startstop_buffer = self._startstop_buffer[window_shift:]
-            self._process_startstop_piece(window, sample_rate)
+            self._process_startstop_piece(window)
 
-    def _process_startstop_piece(self, samples, sample_rate):
+    def _process_startstop_piece(self, samples):
         # Compute the power spectrum
         samples = fft_complex(samples)
         P = power_db(samples)
-        Psorted = sorted(P)
         # DUMP POINT
         if self._options.dump_spectra and self._state != 'idle':
             dump_to_csv(self._output_name + '-ss.csv', P)
+        # Don't need negative part anyway
+        P = P[:len(P)//2]
         # Assume noise floor is the median value + 5dB
+        Psorted = sorted(P)
         nf_level = Psorted[len(Psorted) // 2] + 5.0
         pk_level = Psorted[-1]
         peaks = peak_detect(P, nf_level + 10)
-        logging.info("Peaks: [%s]", ' '.join([ '%04d:%+05.1f' % (x[0] + self._tuning_offset, x[1]) for x in peaks ]))
+        logging.info("Peaks: [%s]", ' '.join([ '%04d:%+05.1f' % (x[0], x[1]) for x in peaks ]))
         # For each peak, test if it's the one around the start/stop middle freq
-        # For 4096-wide FFT: W=170 B=1536 S=853
+        # For 4096-wide FFT: W=981 B=640 S=810 Start576=[682,939], Stop=[618,1002]
         detect_startstop = False
         detect_start576L = False
         detect_start576H = False
         detect_stopL = False
         detect_stopH = False
-        # If no tuning offset correction was performed before,
-        # make sure it is wide enough to capture the peaks
-        if self._tuning_offset_valid:
-            detect_width = self._ss_window_size // 45
-        else:
-            detect_width = self._ss_window_size // 35
+        # Classify the peaks
         for peak_bin, peak_power in peaks:
-            # Correct and ensure wraparound is applied
-            peak_bin_relative = peak_bin + self._tuning_offset
-            while peak_bin_relative >= self._ss_window_size:
-                peak_bin_relative -= self._ss_window_size
-            while peak_bin_relative < 0:
-                peak_bin_relative += self._ss_window_size
-            # Shift to the center peak location
-            peak_bin_relative -= self._startstop_center_bin
-            if math.fabs(peak_bin_relative) < detect_width:
+            # Try to classify the peak
+            # Don't apply tuning correction for the start/stop center peak
+            if math.fabs(peak_bin - self._startstop_center_bin) < self._ss_width:
                 if self._state in ('idle', 'starting'):
                     self._tuning_offset = self._startstop_center_bin - peak_bin
                 detect_startstop = True
-            elif math.fabs(peak_bin_relative - self._stop_delta) < detect_width:
-                detect_stopL = True
-            elif math.fabs(peak_bin_relative + self._stop_delta) < detect_width:
-                detect_stopH = True
-            elif math.fabs(peak_bin_relative - self._start576_delta) < detect_width:
-                detect_start576L = True
-            elif math.fabs(peak_bin_relative + self._start576_delta) < detect_width:
-                detect_start576H = True
-        detect_start576 = detect_start576L and detect_start576H
-        detect_stop = detect_stopL and detect_stopH
+            else:
+                peak_bin_relative = peak_bin + self._tuning_offset - self._startstop_center_bin
+                if math.fabs(peak_bin_relative - self._stop_delta) < self._ss_tone_width:
+                    detect_stopL = True
+                if math.fabs(peak_bin_relative + self._stop_delta) < self._ss_tone_width:
+                    detect_stopH = True
+                if math.fabs(peak_bin_relative - self._start576_delta) < self._ss_tone_width:
+                    detect_start576L = True
+                if math.fabs(peak_bin_relative + self._start576_delta) < self._ss_tone_width:
+                    detect_start576H = True
+        detect_start576 = detect_startstop and detect_start576L and detect_start576H
+        detect_stop = detect_startstop and detect_stopL and detect_stopH
         if self._state in ('idle', 'starting'):
-            self._startstop_adjust(detect_startstop and detect_start576)
+            self._startstop_adjust(detect_start576)
         else:
-            self._startstop_adjust(detect_startstop and detect_stop)
+            self._startstop_adjust(detect_stop)
 
         logging.info("NF=%05.1f PK=%05.1f  TO=%+04d/%+06.2fHz SS=%02d NC=%02d %s%s%s%s%s",
             nf_level, pk_level, self._tuning_offset, self._tuning_offset * self._bin_size,
@@ -364,19 +438,23 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
     def _process_pixels(self, samples):
         if not self._state in ('phasing', 'printing', 'stopping'):
             return
-        detected = fm_detect(samples, self._prevX, -0.1 * math.pi)
+        pixels = fm_detect(samples, self._prevX, -0.1 * math.pi)
         self._prevX = samples[-1]
+        if True:
+            self._averager.refill(pixels)
+            pixels = list()
+            pixels.extend(self._averager)
         # DUMP POINT
         if self._options.dump_pixels:
-            dump_to_csv(self._output_name + '-px.csv', detected)
+            dump_to_csv(self._output_name + '-px.csv', pixels)
         # Remap the detected region into [0,1)
         # TODO: Figure out the best way to go from Hz to fractions there
         # Black: average 0.355, very strong HF component?
         # White: average 1.01
         # Noise margins +- 0.05
-        correction = 0 # self._tuning_offset * self._bin_size / 1200
-        black_thresh, white_thresh = 0.45, 0.95
-        pixels = array.array('f', mapper_df_to_intensity(detected, black_thresh+correction, white_thresh+correction))
+        correction = self._tuning_offset * self._bin_size / 4800
+        black_thresh, white_thresh = 0.65, 0.80 # 0.45, 0.95
+        pixels = array.array('f', mapper_df_to_intensity(pixels, black_thresh+correction, white_thresh+correction))
         # Scale and adjust pixel rate
         self._resampler.refill(pixels)
         self._pixel_buffer.extend(self._resampler)
@@ -459,8 +537,14 @@ KNOWN_CORRECTION_FACTORS = {
         7880.00: -13.0,
     },
     'sarloutca.ddns.net:8073': {
-        7880.00: -7.0,
+        7880.00: -9.0,
     },
+    'szsdr.ddns.net:8073': {
+        9165.00: -11.0,
+    },
+    '72.130.191.200:8073': {
+        11090.00: -7.0,
+    }
 }
 
 def main():
