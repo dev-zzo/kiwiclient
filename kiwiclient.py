@@ -134,7 +134,10 @@ class KiwiSDRClientBase(object):
         self._stream.send_message('SET autonotch=%d' % (val))
 
     def set_name(self, name):
-        self._stream.send_message('SET name=%d' % (name))
+        self._stream.send_message('SET name=%s' % (name))
+
+    def set_geo(self, geo):
+        self._stream.send_message('SET geo=%s' % (geo))
 
     def _set_auth(self, client_type, password=''):
         self._stream.send_message('SET auth t=%s p=%s' % (client_type, password))
