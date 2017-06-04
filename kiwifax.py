@@ -35,11 +35,11 @@ def clamp(x, xmin, xmax):
 def norm_clamp(x, xmin, xmax):
     return (clamp(x, xmin, xmax) - xmin) / (xmax - xmin)
 
-def fm_detect(X, prev, angle):
-    angle_coeff = cmath.rect(1, angle)
+def fm_detect(X, prev):
     vals = array.array('f')
     for x in X:
-        vals.append(1 - cmath.phase(x * prev.conjugate() * angle_coeff) / math.pi)
+        y = cmath.phase(x * prev.conjugate()) / math.pi
+        vals.append(y)
         prev = x
     return vals
 
@@ -213,7 +213,7 @@ class Interpolator:
 
 def mapper_df_to_intensity(dfs, black_thresh, white_thresh):
     for x in dfs:
-        yield 1 - norm_clamp(x, black_thresh, white_thresh)
+        yield norm_clamp(x, black_thresh, white_thresh)
 
 
 class Averager:
@@ -295,8 +295,11 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
             pass
 
     def _setup_rx_params(self):
-        self.set_mod('usb', RADIOFAX_BLACK_FREQ-1000, RADIOFAX_WHITE_FREQ+1000, self._options.frequency - 1.9)
+        df = 1000
+        self.set_mod('usb', RADIOFAX_BLACK_FREQ - df, RADIOFAX_WHITE_FREQ + df, self._options.frequency - 1.9)
         self.set_agc(True)
+        self.set_name('kiwifax')
+        self.set_geo('Antarctica')
 
     def _on_sample_rate_change(self):
         # Precompute everything that depends on the SR
@@ -318,6 +321,10 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
         resample_factor = (samples_per_line / self._pixels_per_line) * self._line_scale_factor
         self._resampler.set_factor(resample_factor)
         logging.info("Resampling factor: %f", resample_factor)
+        contrast = 0.0
+        self._white_level = (2 * RADIOFAX_WHITE_FREQ / sample_rate) - contrast
+        self._black_level = (2 * RADIOFAX_BLACK_FREQ / sample_rate) + contrast
+        self._fc_factor = 2 * self._bin_size / sample_rate
 
     def _process_samples(self, seq, samples, rssi):
         logging.info('Block: %08x, RSSI: %04d %s', seq, rssi, self._state)
@@ -438,23 +445,18 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
     def _process_pixels(self, samples):
         if not self._state in ('phasing', 'printing', 'stopping'):
             return
-        pixels = fm_detect(samples, self._prevX, -0.1 * math.pi)
+        pixels = fm_detect(samples, self._prevX)
         self._prevX = samples[-1]
-        if True:
-            self._averager.refill(pixels)
-            pixels = list()
-            pixels.extend(self._averager)
+        # Average out noise
+        self._averager.refill(pixels)
+        pixels = list()
+        pixels.extend(self._averager)
         # DUMP POINT
         if self._options.dump_pixels:
             dump_to_csv(self._output_name + '-px.csv', pixels)
         # Remap the detected region into [0,1)
-        # TODO: Figure out the best way to go from Hz to fractions there
-        # Black: average 0.355, very strong HF component?
-        # White: average 1.01
-        # Noise margins +- 0.05
-        correction = self._tuning_offset * self._bin_size / 4800
-        black_thresh, white_thresh = 0.65, 0.80 # 0.45, 0.95
-        pixels = array.array('f', mapper_df_to_intensity(pixels, black_thresh+correction, white_thresh+correction))
+        shift = self._tuning_offset * self._fc_factor
+        pixels = array.array('f', mapper_df_to_intensity(pixels, self._black_level-shift, self._white_level-shift))
         # Scale and adjust pixel rate
         self._resampler.refill(pixels)
         self._pixel_buffer.extend(self._resampler)
@@ -534,16 +536,19 @@ KNOWN_CORRECTION_FACTORS = {
         9165.00: -11.0,
     },
     'reute.dyndns-remote.com:8073': {
-        7880.00: -13.0,
+        7880.00: -15.0,
+        13882.50: -15.0,
     },
     'sarloutca.ddns.net:8073': {
-        7880.00: -9.0,
+        7880.00: -11.0,
     },
     'szsdr.ddns.net:8073': {
         9165.00: -11.0,
     },
     '72.130.191.200:8073': {
-        11090.00: -7.0,
+        9982.50: -13.0,
+        11090.00: -11.0,
+        16135.00: -11.0,
     }
 }
 
