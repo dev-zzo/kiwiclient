@@ -95,12 +95,13 @@ class KiwiSDRClientBase(object):
     def __init__(self):
         self._socket = None
         self._sample_rate = None
+        self._isIQ = False
 
     def connect(self, host, port):
         self._socket = socket.socket()
         self._socket.settimeout(self._options.socket_timeout)
         self._socket.connect((host, port))
-        self._prepare_stream(host, port, '/%d/AUD' % int(time.time()))
+        self._prepare_stream(host, port, '/%d/SND' % int(time.time()))
 
     def _prepare_stream(self, host, port, which):
         import mod_pywebsocket.common
@@ -120,6 +121,8 @@ class KiwiSDRClientBase(object):
         self._stream = Stream(request, stream_option)
 
     def set_mod(self, mod, lc, hc, freq):
+        if mod == 'iq':
+            self._isIQ = True
         self._stream.send_message('SET mod=%s low_cut=%d high_cut=%d freq=%.3f' % (mod, lc, hc, freq))
 
     def set_agc(self, on=False, hang=False, thresh=-100, slope=6, decay=1000, gain=50):
@@ -132,7 +135,7 @@ class KiwiSDRClientBase(object):
         self._stream.send_message('SET autonotch=%d' % (val))
 
     def set_name(self, name):
-        self._stream.send_message('SET name=%d' % (name))
+        self._stream.send_message('SET name=%s' % (name))
 
     def _set_auth(self, client_type, password=''):
         self._stream.send_message('SET auth t=%s p=%s' % (client_type, password))
@@ -148,7 +151,7 @@ class KiwiSDRClientBase(object):
         self._stream.send_message('SET keepalive')
 
     def _server_de(self, client):
-        self._stream.send_message('SERVER DE CLIENT %s AUD' % (client))
+        self._stream.send_message('SERVER DE CLIENT %s SND' % (client))
 
     def _process_msg_param(self, name, value):
         print "%s: %s" % (name, value)
@@ -182,7 +185,7 @@ class KiwiSDRClientBase(object):
         smeter = struct.unpack('>H', body[4:6])[0]
         data = body[6:]
         rssi = (smeter & 0x0FFF) // 10 - 127
-        self._process_samples(seq, self._decoder.decode(data), rssi)
+        self._process_samples(seq, data if self._isIQ else self._decoder.decode(data), rssi)
 
     def _process_samples(self, seq, samples, rssi):
         pass
@@ -207,7 +210,7 @@ class KiwiSDRClientBase(object):
                 id, body = received.split(' ', 1)
                 if id == 'MSG':
                     self._process_msg(body)
-                elif id == 'AUD':
+                elif id == 'SND':
                     self._process_aud(body)
                     # Ensure we don't get kicked due to timeouts
                     self._set_keepalive()

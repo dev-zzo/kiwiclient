@@ -155,18 +155,27 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
             self._startstop_score = 0
 
     def _setup_rx_params(self):
-        #self.set_mod('usb', 300, 2500, self._options.frequency - 1.9)
-        self.set_mod('usb', 1500-1000, 2300+1000, self._options.frequency - 1.9)
+        if self._options.iq_mode:
+            self.set_mod('iq', 1500-1000, 2300+1000, self._options.frequency - 1.9)
+        else:
+            #self.set_mod('usb', 300, 2500, self._options.frequency - 1.9)
+            #self.set_mod('usb', 1500-1000, 2300+1000, self._options.frequency - 1.9)
+            self.set_mod('usb', 1500-1000, 2300+1000, self._options.frequency - 1.9)
         self.set_agc(True)
+        self.set_name('kiwifax' if self._options.iq_mode else 'kiwi-IQ')
 
     def _process_samples(self, seq, samples, rssi):
-        logging.info('Block: %08x, RSSI: %04d %s', seq, rssi, self._state)
-        samples = [ x / 32768.0 for x in samples ]
-
-        X = real2complex(samples)
-        sample_rate = self._sample_rate / 4
-        self._process_startstop(X, sample_rate)
-        self._process_pixels(X, sample_rate)
+        logging.info('Block: %08x, RSSI: %04d %s len: %d', seq, rssi, self._state, len(samples))
+        if self._options.iq_mode:
+            sample_rate = self._sample_rate
+            # do something..
+        else:
+            samples = [ x / 32768.0 for x in samples ]
+    
+            X = real2complex(samples)
+            sample_rate = self._sample_rate / 4
+            self._process_startstop(X, sample_rate)
+            self._process_pixels(X, sample_rate)
 
     def _startstop_adjust(self, updown):
         if updown:
@@ -326,6 +335,10 @@ def main():
     parser.add_option('-p', '--server-port', '--server_port',
                       dest='server_port', type='int',
                       default=8073, help='server port')
+    parser.add_option('-q', '--iq',
+                      dest='iq_mode',
+                      action='store_true', default=False,
+                      help='IQ data mode')
 
     parser.add_option('-f', '--freq',
                       dest='frequency',
