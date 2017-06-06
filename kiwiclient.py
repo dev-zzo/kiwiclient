@@ -94,9 +94,11 @@ class KiwiSDRClientBase(object):
 
     def __init__(self):
         self._socket = None
+        self._decoder = None
         self._sample_rate = None
         self._version_major = None
         self._version_minor = None
+        self._modulation = None
 
     def connect(self, host, port):
         self._socket = socket.socket()
@@ -122,6 +124,8 @@ class KiwiSDRClientBase(object):
         self._stream = Stream(request, stream_option)
 
     def set_mod(self, mod, lc, hc, freq):
+        mod = mod.lower()
+        self._modulation = mod
         self._stream.send_message('SET mod=%s low_cut=%d high_cut=%d freq=%.3f' % (mod, lc, hc, freq))
 
     def set_agc(self, on=False, hang=False, thresh=-100, slope=6, decay=1000, gain=50):
@@ -138,6 +142,9 @@ class KiwiSDRClientBase(object):
 
     def set_geo(self, geo):
         self._stream.send_message('SET geo=%s' % (geo))
+
+    def set_inactivity_timeout(self, timeout):
+        self._stream.send_message('SET OVERRIDE inactivity_timeout=%d' % (timeout))
 
     def _set_auth(self, client_type, password=''):
         self._stream.send_message('SET auth t=%s p=%s' % (client_type, password))
@@ -190,16 +197,26 @@ class KiwiSDRClientBase(object):
             self._process_msg_param(name, value)
 
     def _process_aud(self, body):
-        seq = struct.unpack('<I', body[:4])[0]
+        seq = struct.unpack('<I', body[0:4])[0]
         smeter = struct.unpack('>H', body[4:6])[0]
         data = body[6:]
         rssi = (smeter & 0x0FFF) // 10 - 127
-        self._process_samples(seq, self._decoder.decode(data), rssi)
+        if self._modulation == 'iq':
+            count = len(data) // 2
+            data = struct.unpack('>%dH' % count, data)
+            samples = [ complex(data[i+0], data[i+1]) for i in xrange(0, count, 2) ]
+            self._process_iq_samples(seq, samples, rssi)
+        else:
+            samples = self._decoder.decode(data)
+            self._process_audio_samples(seq, samples, rssi)
 
     def _on_sample_rate_change(self):
         pass
 
-    def _process_samples(self, seq, samples, rssi):
+    def _process_audio_samples(self, seq, samples, rssi):
+        pass
+
+    def _process_iq_samples(self, seq, samples, rssi):
         pass
 
     def _setup_rx_params(self):
