@@ -217,9 +217,10 @@ def mapper_df_to_intensity(dfs, black_thresh, white_thresh):
 
 
 class Averager:
-    def __init__(self):
+    def __init__(self, factor):
         self._buffer = array.array('f')
         self._i = 0
+        self._factor = factor
     def refill(self, samples):
         for x in samples:
             self._buffer.append(float(x))
@@ -227,12 +228,14 @@ class Averager:
         return self
     def next(self):
         i = self._i
-        if i + 2 >= len(self._buffer):
+        if i + self._factor > len(self._buffer):
             self._flush()
             raise StopIteration()
-        x = (self._buffer[i+0] + self._buffer[i+1] + self._buffer[i+2]) / 3
+        x = 0
+        for j in xrange(self._factor):
+            x += self._buffer[i+j]
         self._i = i + 1
-        return x
+        return x / self._factor
     def _flush(self):
         self._buffer = self._buffer[self._i:]
         self._i = 0
@@ -253,6 +256,8 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
         self._lpm = options.lpm
 
         self._state = 'idle'
+        
+        self._use_iq = options.iq_stream
 
         self._iqconverter = None
         self._tuning_offset = 0
@@ -265,13 +270,16 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
         self._prevX = complex(0)
         self._phasing_count = 0
         self._resampler = Interpolator(1.0)
-        self._averager = Averager()
+        if self._lpm == 60:
+            self._averager = Averager(7)
+        else:
+            self._averager = Averager(4)
         self._line_scale_factor = 1.0 - 1e-6 * options.sr_coeff
         self._rows = []
         self._pixel_buffer = array.array('f')
         self._pixels_per_line = 1809
-        # NOTE: Kyodo pages are ~5400px
-        self._max_height = 5500
+        # NOTE: Kyodo pages are ~5500px
+        self._max_height = options.max_height
 
         self._new_roll()
         if options.force:
@@ -296,9 +304,13 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
 
     def _setup_rx_params(self):
         df = 1000
-        self.set_mod('usb', RADIOFAX_BLACK_FREQ - df, RADIOFAX_WHITE_FREQ + df, self._options.frequency - 1.9)
+        if self._use_iq:
+            self.set_mod('iq', RADIOFAX_BLACK_FREQ - df, RADIOFAX_WHITE_FREQ + df, self._options.frequency - 1.9)
+        else:
+            self.set_mod('usb', RADIOFAX_BLACK_FREQ - df, RADIOFAX_WHITE_FREQ + df, self._options.frequency - 1.9)
         self.set_agc(True)
-        self.set_name('kiwifax')
+        self.set_inactivity_timeout(0)
+        self.set_name('')
         self.set_geo('Antarctica')
 
     def _on_sample_rate_change(self):
@@ -315,26 +327,36 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
         self._start288_delta = int(RADIOFAX_IOC288_START_TONE / resolution)
         self._stop_delta = int(RADIOFAX_STOP_TONE / resolution)
         self._ss_width = int(0.5 * (RADIOFAX_WHITE_FREQ - RADIOFAX_STARTSTOP_FREQ) / resolution)
-        self._ss_tone_width = int(0.5 * (RADIOFAX_STOP_TONE - RADIOFAX_IOC576_START_TONE) / resolution)
+        # NOTE: tone width is halved -- it should be precise anyway
+        self._ss_tone_width = int(0.5 * 0.5 * (RADIOFAX_STOP_TONE - RADIOFAX_IOC576_START_TONE) / resolution)
         # Pixel output params
         samples_per_line = sample_rate * 60.0 / self._lpm
         resample_factor = (samples_per_line / self._pixels_per_line) * self._line_scale_factor
         self._resampler.set_factor(resample_factor)
         logging.info("Resampling factor: %f", resample_factor)
-        contrast = 0.0
-        self._white_level = (2 * RADIOFAX_WHITE_FREQ / sample_rate) - contrast
-        self._black_level = (2 * RADIOFAX_BLACK_FREQ / sample_rate) + contrast
+        contrast = 0.01
+        shift = -0.02
+        self._white_level = (2 * RADIOFAX_WHITE_FREQ / sample_rate) - contrast + shift
+        self._black_level = (2 * RADIOFAX_BLACK_FREQ / sample_rate) + contrast + shift
         self._fc_factor = 2 * self._bin_size / sample_rate
+
+    def _process_audio_samples(self, seq, samples, rssi):
+        k = 1 / 32768.0
+        samples = [ x * k for x in samples ]
+        samples = self._iqconverter.convert(samples)
+        self._process_samples(seq, samples, rssi)
+
+    def _process_iq_samples(self, seq, samples, rssi):
+        k = 1 / 32768.0
+        samples = [ x * k for x in samples ]
+        self._process_samples(seq, samples, rssi)
 
     def _process_samples(self, seq, samples, rssi):
         logging.info('Block: %08x, RSSI: %04d %s', seq, rssi, self._state)
-        samples = [ x / 32768.0 for x in samples ]
+        self._process_startstop(samples)
+        self._process_pixels(samples)
 
-        X = self._iqconverter.convert(samples)
-        self._process_startstop(X)
-        self._process_pixels(X)
-
-    def _startstop_adjust(self, updown):
+    def _startstop_score_update(self, updown):
         if updown:
             if self._startstop_score < 10:
                 self._startstop_score += 1
@@ -382,6 +404,7 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
             # Try to classify the peak
             # Don't apply tuning correction for the start/stop center peak
             if math.fabs(peak_bin - self._startstop_center_bin) < self._ss_width:
+                # NOTE: If force started, this doesn't get triggered properly
                 if self._state in ('idle', 'starting'):
                     self._tuning_offset = self._startstop_center_bin - peak_bin
                 detect_startstop = True
@@ -398,9 +421,9 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
         detect_start576 = detect_startstop and detect_start576L and detect_start576H
         detect_stop = detect_startstop and detect_stopL and detect_stopH
         if self._state in ('idle', 'starting'):
-            self._startstop_adjust(detect_start576)
+            self._startstop_score_update(detect_start576)
         else:
-            self._startstop_adjust(detect_stop)
+            self._startstop_score_update(detect_stop)
 
         logging.info("NF=%05.1f PK=%05.1f  TO=%+04d/%+06.2fHz SS=%02d NC=%02d %s%s%s%s%s",
             nf_level, pk_level, self._tuning_offset, self._tuning_offset * self._bin_size,
@@ -482,7 +505,7 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
             self._switch_state('printing')
             return
         # Do a moving average of the pixel intensity
-        phasing_pulse_size = 70
+        phasing_pulse_size = 90
         i = 0
         while i + phasing_pulse_size < len(self._pixel_buffer):
             s = 0
@@ -508,7 +531,7 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
         self._flush_rows()
         if len(self._rows) >= self._max_height:
             logging.info("Length exceeded; cutting the paper")
-            self._new_roll()
+            self._switch_state('idle')
 
     def _flush_rows(self):
         if not self._rows:
@@ -533,7 +556,7 @@ KNOWN_CORRECTION_FACTORS = {
     },
     'travelx.org:8074': {
         7795.00: +0.0,
-        9165.00: -11.0,
+        9165.00: -14.0,
     },
     'reute.dyndns-remote.com:8073': {
         7880.00: -15.0,
@@ -547,8 +570,8 @@ KNOWN_CORRECTION_FACTORS = {
     },
     '72.130.191.200:8073': {
         9982.50: -13.0,
-        11090.00: -11.0,
-        16135.00: -11.0,
+        11090.00: -13.0,
+        16135.00: -13.0,
     }
 }
 
@@ -586,10 +609,14 @@ def main():
                       dest='lpm',
                       type='int', default=120,
                       help='Lines per minute; default: 120.')
-    parser.add_option('--sr-coeff', '--sr-coeff',
+    parser.add_option('--sr-coeff', '--sr_coeff',
                       dest='sr_coeff',
                       type='float', default=0,
                       help='Sample frequency correction, ppm; positive if the lines are too short; negative otherwise')
+    parser.add_option('--max-height', '--max_height',
+                      dest='max_height',
+                      type='int', default=2300,
+                      help='Maximum page height; default: 2300.')
     parser.add_option('--dump-spectra', '--dump-spectra',
                       dest='dump_spectra',
                       action='store_true', default=False,
@@ -598,6 +625,10 @@ def main():
                       dest='dump_pixels',
                       action='store_true', default=False,
                       help='Dump row pixels to a CSV file')
+    parser.add_option('--iq-stream', '--iq_stream',
+                      dest='iq_stream',
+                      action='store_true', default=False,
+                      help='EXPERIMENTAL: use IQ stream instead of audio')
 
     (options, unused_args) = parser.parse_args()
 
