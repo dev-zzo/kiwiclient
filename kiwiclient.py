@@ -95,12 +95,14 @@ class KiwiSDRClientBase(object):
     def __init__(self):
         self._socket = None
         self._sample_rate = None
+        self._version_major = None
+        self._version_minor = None
 
     def connect(self, host, port):
         self._socket = socket.socket()
         self._socket.settimeout(self._options.socket_timeout)
         self._socket.connect((host, port))
-        self._prepare_stream(host, port, '/%d/AUD' % int(time.time()))
+        self._prepare_stream(host, port, '/%d/SND' % int(time.time()))
 
     def _prepare_stream(self, host, port, which):
         import mod_pywebsocket.common
@@ -132,7 +134,10 @@ class KiwiSDRClientBase(object):
         self._stream.send_message('SET autonotch=%d' % (val))
 
     def set_name(self, name):
-        self._stream.send_message('SET name=%d' % (name))
+        self._stream.send_message('SET name=%s' % (name))
+
+    def set_geo(self, geo):
+        self._stream.send_message('SET geo=%s' % (geo))
 
     def _set_auth(self, client_type, password=''):
         self._stream.send_message('SET auth t=%s p=%s' % (client_type, password))
@@ -147,30 +152,37 @@ class KiwiSDRClientBase(object):
     def _set_keepalive(self):
         self._stream.send_message('SET keepalive')
 
-    def _server_de(self, client):
-        self._stream.send_message('SERVER DE CLIENT %s AUD' % (client))
-
     def _process_msg_param(self, name, value):
         print "%s: %s" % (name, value)
+        # Handle error conditions
         if name == 'too_busy':
             raise KiwiTooBusyError('all %s client slots taken' % value)
         if name == 'badp' and value == '1':
             raise KiwiBadPasswordError()
         if name == 'down':
             raise KiwiDownError('server is down atm')
+        # Handle data items
         if name == 'audio_rate':
             self._set_ar_ok(int(value), 44100)
         elif name == 'sample_rate':
             self._sample_rate = float(value)
+            self._on_sample_rate_change()
             # Optional, but is it?..
             self.set_squelch(0, 0)
             self.set_autonotch(0)
             self._set_gen(0, 0)
-            self._server_de('openwebrx.js')
             # Required to get rolling
             self._setup_rx_params()
             # Also send a keepalive
             self._set_keepalive()
+        elif name == 'version_maj':
+            self._version_major = value
+            if self._version_major is not None and self._version_minor is not None:
+                logging.info("Server version: %s.%s", self._version_major, self._version_minor)
+        elif name == 'version_min':
+            self._version_minor = value
+            if self._version_major is not None and self._version_minor is not None:
+                logging.info("Server version: %s.%s", self._version_major, self._version_minor)
 
     def _process_msg(self, body):
         for pair in body.split(' '):
@@ -183,6 +195,9 @@ class KiwiSDRClientBase(object):
         data = body[6:]
         rssi = (smeter & 0x0FFF) // 10 - 127
         self._process_samples(seq, self._decoder.decode(data), rssi)
+
+    def _on_sample_rate_change(self):
+        pass
 
     def _process_samples(self, seq, samples, rssi):
         pass
@@ -207,7 +222,7 @@ class KiwiSDRClientBase(object):
                 id, body = received.split(' ', 1)
                 if id == 'MSG':
                     self._process_msg(body)
-                elif id == 'AUD':
+                elif id == 'SND':
                     self._process_aud(body)
                     # Ensure we don't get kicked due to timeouts
                     self._set_keepalive()
