@@ -203,7 +203,7 @@ class KiwiSDRClientBase(object):
         rssi = (smeter & 0x0FFF) // 10 - 127
         if self._modulation == 'iq':
             count = len(data) // 2
-            data = struct.unpack('>%dH' % count, data)
+            data = struct.unpack('>%dh' % count, data)
             samples = [ complex(data[i+0], data[i+1]) for i in xrange(0, count, 2) ]
             self._process_iq_samples(seq, samples, rssi)
         else:
