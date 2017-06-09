@@ -16,10 +16,12 @@ import png
 
 # Known bugs and missing features:
 # * No automatic LPM detection; useful when a station switches between 60 and 120
+# * No automatic white level correction
+# * When IQ input is used, the moving average would be beneficial to lower loise level
 
 
-def dump_to_csv(filename, data):
-    with open(filename, 'a') as fp:
+def dump_to_csv(filename, data, mode='a'):
+    with open(filename, mode) as fp:
         for x in data:
             fp.write("%.6f," % x)
         fp.write("\n")
@@ -35,10 +37,10 @@ def clamp(x, xmin, xmax):
 def norm_clamp(x, xmin, xmax):
     return (clamp(x, xmin, xmax) - xmin) / (xmax - xmin)
 
-def fm_detect(X, prev):
+def fm_detect(X, prev, shift):
     vals = array.array('f')
     for x in X:
-        y = cmath.phase(x * prev.conjugate()) / math.pi
+        y = shift + cmath.phase(x * prev.conjugate()) / math.pi
         vals.append(y)
         prev = x
     return vals
@@ -152,18 +154,36 @@ def peak_detect(data, thresh):
     return peaks
 
 
-class IQConverterDumb:
-    def __init__(self, sample_rate):
-        self.sample_rate = sample_rate / 4
-    def convert(self, samples):
-        if len(samples) % 4:
-            raise ValueError("sample block length must be a multiple of 4")
-        return [ complex(samples[i+0]-samples[i+2], samples[i+1]-samples[i+3]) for i in xrange(0, len(samples), 4) ]
+class FMDetectorAtan2:
+    def __init__(self):
+        self._prev = complex(0)
+    def process(self, samples):
+        Y = array.array('f')
+        prev = self._prev
+        for x in samples:
+            y = cmath.phase(x * prev.conjugate()) / math.pi
+            Y.append(y)
+            prev = x
+        self._prev = prev
+        return Y
+
+class IQConverterDDC:
+    """Convert audio samples to IQ: digital down-convert method"""
+    def __init__(self, fc):
+        "fc is the LO frequency divided by the sample rate"
+        self._w = cmath.rect(1, -fc * 2 * math.pi)
+        self._v = complex(1)
+    def process(self, samples):
+        Y = []
+        for x in samples:
+            Y.append(x * self._v)
+            self._v *= self._w
+        return Y
 
 class IQConverterFFT:
-    def __init__(self, sample_rate):
-        self.sample_rate = sample_rate
-    def convert(self, samples):
+    def __init__(self):
+        pass
+    def process(self, samples):
         X = fft_complex([ complex(x) for x in samples ])
         w = 1 + len(X) // 2
         Y = []
@@ -188,7 +208,7 @@ class Interpolator:
         self.set_factor(factor)
     def set_factor(self, factor):
         self._dt = factor
-    def refill(self, samples):
+    def extend(self, samples):
         for x in samples:
             self._buffer.append(float(x))
     def __iter__(self):
@@ -196,7 +216,6 @@ class Interpolator:
     def next(self):
         t_int = math.trunc(self._t)
         t_frac = self._t - t_int
-        # print "pop", t_int, t_frac, len(self._buffer)
         if t_int + 3 >= len(self._buffer):
             self._flush()
             raise StopIteration()
@@ -205,40 +224,75 @@ class Interpolator:
     def _flush(self):
         t_int = math.trunc(self._t)
         t_new = min(t_int, len(self._buffer))
-        # print "flush", t_int, t_new
         if t_new > 0:
             self._t -= t_new
             self._buffer = self._buffer[t_new:]
+
+class FIRFilter:
+    def __init__(self, kernel):
+        self._kernel = kernel
+        self._buffer = []
+    def process(self, samples):
+        self._buffer.extend(samples)
+        Y = []
+        i = 0
+        while i + len(self._kernel) < len(self._buffer):
+            y = 0
+            for j in xrange(len(self._kernel)):
+                y += self._buffer[i+j] * self._kernel[-j-1]
+            Y.append(y)
+            i += 1
+        self._buffer = self._buffer[i:]
+        return Y
+
+def generate_sinc(fc, length):
+    "Generates a sinc kernel"
+
+    h = []
+    w = 2 * math.pi * fc
+    zf = (length - 1) / 2
+    for i in xrange(0, length):
+        x = i - zf
+        if x == 0:
+            h.append(w)
+        else:
+            h.append(math.sin(w * x) / x)
+    return h
+
+def generate_cosine_window_3(length, a, b, c, d):
+    w = (2 * math.pi) / (length - 1)
+    return [(a - b * math.cos(w * i) + c * math.cos(2 * w * i) -d * math.cos(3 * w * i)) for i in xrange(0, length)]
+
+def generate_blackman_nuttall_window(length):
+    return generate_cosine_window_3(length, 0.3635819, 0.4891775, 0.1365995, 0.0106411)
+
+def apply_window(h, hw):
+    if len(h) != len(hw):
+        raise ValueError("vectors must have equal lengths")
+    return [ h[i] * hw[i] for i in xrange(len(hw)) ]
 
 
 def mapper_df_to_intensity(dfs, black_thresh, white_thresh):
     for x in dfs:
         yield norm_clamp(x, black_thresh, white_thresh)
 
+class Histogram:
+    def __init__(self, bins, xmin, xmax):
+        self._min = xmin
+        self._max = xmax
+        self._bins = [ 0 for i in xrange(bins) ]
+    def put(self, x):
+        x = clamp(x, self._min, self._max)
+        x = (x - self._min) / (self._max - self._min)
+        i = int(x * (len(self._bins) - 1))
+        self._bins[i] += 1
+    def clear(self):
+        for i in xrange(len(self._bins)):
+            self._bins[i] = 0
+    def get(self):
+        s = 1.0 / sum(self._bins)
+        return [ x * s for x in self._bins ]
 
-class Averager:
-    def __init__(self, factor):
-        self._buffer = array.array('f')
-        self._i = 0
-        self._factor = factor
-    def refill(self, samples):
-        for x in samples:
-            self._buffer.append(float(x))
-    def __iter__(self):
-        return self
-    def next(self):
-        i = self._i
-        if i + self._factor > len(self._buffer):
-            self._flush()
-            raise StopIteration()
-        x = 0
-        for j in xrange(self._factor):
-            x += self._buffer[i+j]
-        self._i = i + 1
-        return x / self._factor
-    def _flush(self):
-        self._buffer = self._buffer[self._i:]
-        self._i = 0
 
 # Let them have a name
 RADIOFAX_WHITE_FREQ = 2300
@@ -256,30 +310,29 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
         self._lpm = options.lpm
 
         self._state = 'idle'
-        
+
         self._use_iq = options.iq_stream
 
         self._iqconverter = None
-        self._tuning_offset = 0
-        self._tuning_offset_valid = False
+        self._iqfir = None
+        self._tuning_offset = options.force_offset
         self._ss_window_size = 4096
         self._startstop_buffer = []
         self._startstop_score = 0
-        self._noise_score = 0
 
         self._prevX = complex(0)
         self._phasing_count = 0
-        self._resampler = Interpolator(1.0)
-        if self._lpm == 60:
-            self._averager = Averager(7)
-        else:
-            self._averager = Averager(4)
+        self._resampler = None
         self._line_scale_factor = 1.0 - 1e-6 * options.sr_coeff
         self._rows = []
         self._pixel_buffer = array.array('f')
+        # TODO: compute instead of hardcoding
         self._pixels_per_line = 1809
-        # NOTE: Kyodo pages are ~5500px
+        # NOTE: Kyodo pages are ~8500px
         self._max_height = options.max_height
+
+        self._histoa = Histogram(200, -0.1, +0.1)
+        self._histob = Histogram(257, 0, 1)
 
         self._new_roll()
         if options.force:
@@ -291,8 +344,9 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
         if new_state == 'idle':
             self._startstop_score = 0
             self._noise_score = 0
+            self._histoa.clear()
+            self._histob.clear()
         elif new_state == 'starting':
-            self._tuning_offset_valid = True
             pass
         elif new_state == 'phasing':
             self._new_roll()
@@ -303,47 +357,57 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
             pass
 
     def _setup_rx_params(self):
-        df = 1000
+        df = 1500
         if self._use_iq:
-            self.set_mod('iq', RADIOFAX_BLACK_FREQ - df, RADIOFAX_WHITE_FREQ + df, self._options.frequency - 1.9)
+            # Tuned to the baseband
+            bw = (RADIOFAX_WHITE_FREQ - RADIOFAX_BLACK_FREQ) / 2 + df
+            self.set_mod('iq', -bw, +bw, self._options.frequency)
         else:
+            # Tuned to USB (-1900 Hz)
             self.set_mod('usb', RADIOFAX_BLACK_FREQ - df, RADIOFAX_WHITE_FREQ + df, self._options.frequency - 1.9)
+        # TODO: figure out proper AGC parameters
         self.set_agc(True)
         self.set_inactivity_timeout(0)
         self.set_name('')
         self.set_geo('Antarctica')
 
     def _on_sample_rate_change(self):
+        sample_rate = float(self._sample_rate)
         # Precompute everything that depends on the SR
-        self._iqconverter = IQConverterFFT(self._sample_rate)
-        sample_rate = self._iqconverter.sample_rate
+        self._iqconverter = IQConverterDDC(RADIOFAX_STARTSTOP_FREQ / sample_rate)
+        filter_width = 450 # Hz
+        filter_taps = 17
+        self._iqfir = FIRFilter(apply_window(generate_sinc(filter_width / sample_rate, filter_taps), generate_blackman_nuttall_window(filter_taps)))
         # Start/stop detection params
-        resolution = float(sample_rate) / self._ss_window_size
+        resolution = sample_rate / self._ss_window_size
         self._bin_size = resolution
-        self._white_bin = int(RADIOFAX_WHITE_FREQ / resolution)
-        self._black_bin = int(RADIOFAX_BLACK_FREQ / resolution)
-        self._startstop_center_bin = int(RADIOFAX_STARTSTOP_FREQ / resolution)
+        self._startstop_center_bin = self._ss_window_size // 2 + 0
         self._start576_delta = int(RADIOFAX_IOC576_START_TONE / resolution)
         self._start288_delta = int(RADIOFAX_IOC288_START_TONE / resolution)
         self._stop_delta = int(RADIOFAX_STOP_TONE / resolution)
         self._ss_width = int(0.5 * (RADIOFAX_WHITE_FREQ - RADIOFAX_STARTSTOP_FREQ) / resolution)
+        logging.info("Start/stop center bin: %d; width: %d", self._startstop_center_bin, self._ss_width)
+        logging.info("Start side bins: %d/%d; stop side bins: %d/%d",
+            self._startstop_center_bin+self._start576_delta, self._startstop_center_bin-self._start576_delta,
+            self._startstop_center_bin+self._stop_delta, self._startstop_center_bin-self._stop_delta)
         # NOTE: tone width is halved -- it should be precise anyway
         self._ss_tone_width = int(0.5 * 0.5 * (RADIOFAX_STOP_TONE - RADIOFAX_IOC576_START_TONE) / resolution)
         # Pixel output params
         samples_per_line = sample_rate * 60.0 / self._lpm
         resample_factor = (samples_per_line / self._pixels_per_line) * self._line_scale_factor
-        self._resampler.set_factor(resample_factor)
+        self._resampler = Interpolator(resample_factor)
         logging.info("Resampling factor: %f", resample_factor)
         contrast = 0.01
-        shift = -0.02
-        self._white_level = (2 * RADIOFAX_WHITE_FREQ / sample_rate) - contrast + shift
-        self._black_level = (2 * RADIOFAX_BLACK_FREQ / sample_rate) + contrast + shift
+        brightness = 0.02
+        shift = 0.00
+        self._white_level = (2 * (RADIOFAX_WHITE_FREQ - RADIOFAX_STARTSTOP_FREQ) / sample_rate) - contrast - brightness + shift
+        self._black_level = (2 * (RADIOFAX_BLACK_FREQ - RADIOFAX_STARTSTOP_FREQ) / sample_rate) + contrast + shift
         self._fc_factor = 2 * self._bin_size / sample_rate
 
     def _process_audio_samples(self, seq, samples, rssi):
         k = 1 / 32768.0
         samples = [ x * k for x in samples ]
-        samples = self._iqconverter.convert(samples)
+        samples = self._iqconverter.process(samples)
         self._process_samples(seq, samples, rssi)
 
     def _process_iq_samples(self, seq, samples, rssi):
@@ -353,6 +417,8 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
 
     def _process_samples(self, seq, samples, rssi):
         logging.info('Block: %08x, RSSI: %04d %s', seq, rssi, self._state)
+        if not self._use_iq:
+            samples = self._iqfir.process(samples)
         self._process_startstop(samples)
         self._process_pixels(samples)
 
@@ -381,13 +447,19 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
         # Compute the power spectrum
         samples = fft_complex(samples)
         P = power_db(samples)
+        # DC "removal" for IQ
+        if self._use_iq:
+            P[0] = P[1]
+        # Panoramize
+        P1 = P[len(P)//2:]
+        P1.extend(P[:len(P)//2])
+        P = P1
         # DUMP POINT
         if self._options.dump_spectra and self._state != 'idle':
             dump_to_csv(self._output_name + '-ss.csv', P)
-        # Don't need negative part anyway
-        P = P[:len(P)//2]
         # Assume noise floor is the median value + 5dB
-        Psorted = sorted(P)
+        Px = P[2048-425:2048+425]
+        Psorted = sorted(Px)
         nf_level = Psorted[len(Psorted) // 2] + 5.0
         pk_level = Psorted[-1]
         peaks = peak_detect(P, nf_level + 10)
@@ -425,9 +497,9 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
         else:
             self._startstop_score_update(detect_stop)
 
-        logging.info("NF=%05.1f PK=%05.1f  TO=%+04d/%+06.2fHz SS=%02d NC=%02d %s%s%s%s%s",
+        logging.info("NF=%05.1f PK=%05.1f  TO=%+04d/%+06.2fHz SS=%02d %s%s%s%s%s",
             nf_level, pk_level, self._tuning_offset, self._tuning_offset * self._bin_size,
-            self._startstop_score, self._noise_score,
+            self._startstop_score,
             "sS"[detect_startstop], '-5'[detect_start576L], '-5'[detect_start576H], "xX"[detect_stopL], "xX"[detect_stopH])
         # Decide
         if self._state == 'idle':
@@ -445,18 +517,6 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
             if self._startstop_score < 3:
                 self._flush_rows()
                 self._switch_state('idle')
-        # Check if we are listening to noise only
-        # Heuristic: no white or black tones for a while
-        if False and self._state != 'idle':
-            if not (detect_white or detect_black or detect_startstop):
-                self._noise_score += 1
-                if self._noise_score >= 100:
-                    logging.critical('NOISE ONLY DETECTED')
-                    self._switch_state('idle')
-            else:
-                self._noise_score -= 5
-                if self._noise_score < 0:
-                    self._noise_score = 0
 
     def _new_roll(self):
         self._rows = []
@@ -468,20 +528,20 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
     def _process_pixels(self, samples):
         if not self._state in ('phasing', 'printing', 'stopping'):
             return
-        pixels = fm_detect(samples, self._prevX)
+        shift = self._tuning_offset * self._fc_factor
+        pixels = fm_detect(samples, self._prevX, shift)
         self._prevX = samples[-1]
-        # Average out noise
-        self._averager.refill(pixels)
-        pixels = list()
-        pixels.extend(self._averager)
         # DUMP POINT
         if self._options.dump_pixels:
             dump_to_csv(self._output_name + '-px.csv', pixels)
+        for x in pixels:
+            self._histoa.put(x)
         # Remap the detected region into [0,1)
-        shift = self._tuning_offset * self._fc_factor
-        pixels = array.array('f', mapper_df_to_intensity(pixels, self._black_level-shift, self._white_level-shift))
+        pixels = array.array('f', mapper_df_to_intensity(pixels, self._black_level, self._white_level))
+        for x in pixels:
+            self._histob.put(x)
         # Scale and adjust pixel rate
-        self._resampler.refill(pixels)
+        self._resampler.extend(pixels)
         self._pixel_buffer.extend(self._resampler)
 
         if self._state == 'phasing':
@@ -543,6 +603,11 @@ class KiwiFax(kiwiclient.KiwiSDRClientBase):
                     break
                 except KeyboardInterrupt:
                     pass
+        # DUMP POINT
+        if self._options.dump_histo:
+            dump_to_csv(self._output_name + '-hh.csv', self._histoa.get(), 'w')
+            dump_to_csv(self._output_name + '-hh.csv', self._histob.get(), 'a')
+
 
 KNOWN_CORRECTION_FACTORS = {
     'kiwisdr.northlandradio.nz:8073': {
@@ -601,6 +666,10 @@ def main():
                       dest='force',
                       action='store_true', default=False,
                       help='Force the decoding without waiting for start tone or phasing')
+    parser.add_option('--force-offset', '--force_offset',
+                      dest='force_offset',
+                      type='int', default=0,
+                      help='When force decoding, apply this tuning offset (bins).')
     parser.add_option('-i', '--ioc',
                       dest='ioc',
                       type='int', default=576,
@@ -625,6 +694,10 @@ def main():
                       dest='dump_pixels',
                       action='store_true', default=False,
                       help='Dump row pixels to a CSV file')
+    parser.add_option('--dump-histo', '--dump_histo',
+                      dest='dump_histo',
+                      action='store_true', default=False,
+                      help='Dump pixel intensity histograms to a CSV file')
     parser.add_option('--iq-stream', '--iq_stream',
                       dest='iq_stream',
                       action='store_true', default=False,
