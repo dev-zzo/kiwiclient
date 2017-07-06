@@ -15,7 +15,7 @@ def _write_wav_header(fp, filesize, samplerate):
     fp.write(struct.pack('<4sIHHIIHH', 'fmt ', 16, 1, 1, samplerate, samplerate * 16 / 8, 16 / 8, 16))
     fp.write(struct.pack('<4sI', 'data', filesize - 12 - 8 - 16 - 8))
 
-class KiwiRecorder(kiwiclient.KiwiSDRClientBase):
+class KiwiRecorder(kiwiclient.KiwiSDRSoundStream):
     def __init__(self, options):
         super(KiwiRecorder, self).__init__()
         self._options = options
@@ -28,7 +28,6 @@ class KiwiRecorder(kiwiclient.KiwiSDRClientBase):
         self._nf_index = 0
 
     def _setup_rx_params(self):
-        self._logger.info('Setting up reception')
         mod = self._options.modulation
         lp_cut = self._options.lp_cut
         hp_cut = self._options.hp_cut
@@ -38,8 +37,11 @@ class KiwiRecorder(kiwiclient.KiwiSDRClientBase):
             lp_cut = -hp_cut
         self.set_mod(mod, lp_cut, hp_cut, freq)
         self.set_agc(True)
+        self.set_inactivity_timeout(0)
+        self.set_name('')
+        self.set_geo('Antarctica')
 
-    def _process_samples(self, seq, samples, rssi, thresh=12):
+    def _process_audio_samples(self, seq, samples, rssi):
         sys.stdout.write('\rBlock: %08x, RSSI: %-04d' % (seq, rssi))
         if self._nf_samples < len(self._nf_array) or self._squelch_on_seq is None:
             self._nf_array[self._nf_index] = rssi
@@ -51,7 +53,7 @@ class KiwiRecorder(kiwiclient.KiwiSDRClientBase):
             return
             
         median_nf = sorted(self._nf_array)[len(self._nf_array) // 3]
-        rssi_thresh = median_nf + thresh
+        rssi_thresh = median_nf + self._options.thresh
         is_open = self._squelch_on_seq is not None
         if is_open:
             rssi_thresh -= 6
@@ -134,6 +136,10 @@ def main():
                       dest='station',
                       type='string', default=None,
                       help='Station ID to be appended')
+    parser.add_option('-T', '--threshold',
+                      dest='thresh',
+                      type='float', default=0,
+                      help='Squelch threshold, in dB.')
 
     (options, unused_args) = parser.parse_args()
 

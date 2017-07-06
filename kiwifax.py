@@ -302,7 +302,7 @@ RADIOFAX_IOC576_START_TONE = 300
 RADIOFAX_IOC288_START_TONE = 675
 RADIOFAX_STOP_TONE = 450
 
-class KiwiFax(kiwiclient.KiwiSDRClientBase):
+class KiwiFax(kiwiclient.KiwiSDRSoundStream):
     def __init__(self, options):
         super(KiwiFax, self).__init__()
         self._options = options
@@ -629,6 +629,7 @@ KNOWN_CORRECTION_FACTORS = {
     },
     'sarloutca.ddns.net:8073': {
         7880.00: -11.0,
+        13882.50: -11.0,
     },
     'szsdr.ddns.net:8073': {
         9165.00: -11.0,
