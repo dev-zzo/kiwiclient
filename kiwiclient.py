@@ -138,7 +138,7 @@ class KiwiSDRStreamBase(object):
         self._send_message('SET auth t=%s p=%s' % (client_type, password))
 
     def set_name(self, name):
-        self._send_message('SET name=%s' % (name))
+        self._send_message('SET ident_user=%s' % (name))
 
     def set_geo(self, geo):
         self._send_message('SET geo=%s' % (geo))
