@@ -661,7 +661,7 @@ def main():
 
     parser.add_option('-f', '--freq',
                       dest='frequency',
-                      type='float',
+                      type='float', default=4610,
                       help='Frequency to tune to, in kHz (will be tuned down by 1.9kHz)')
     parser.add_option('--station', '--station',
                       dest='station',

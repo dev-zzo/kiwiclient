@@ -118,7 +118,7 @@ def main():
 
     parser.add_option('-f', '--freq',
                       dest='frequency',
-                      type='float',
+                      type='float', default=1000,
                       help='Frequency to tune to, in kHz.')
     parser.add_option('-m', '--modulation',
                       dest='modulation',
