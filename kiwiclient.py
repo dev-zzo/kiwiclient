@@ -89,29 +89,38 @@ class KiwiDownError(KiwiError):
 class KiwiBadPasswordError(KiwiError):
     pass
 
-class KiwiSDRClientBase(object):
-    """KiwiSDR WebSocket client."""
+class KiwiSDRStreamBase(object):
+    """KiwiSDR WebSocket stream client."""
 
     def __init__(self):
         self._socket = None
+        self._decoder = None
         self._sample_rate = None
         self._isIQ = False
         self._version_major = None
         self._version_minor = None
+        self._modulation = None
 
     def connect(self, host, port):
-        self._socket = socket.socket()
-        self._socket.settimeout(self._options.socket_timeout)
-        self._socket.connect((host, port))
-        self._prepare_stream(host, port, '/%d/SND' % int(time.time()))
+        # self._prepare_stream(host, port, 'SND')
+        pass
+
+    def _process_message(self, tag, body):
+        print 'Unknown message tag: %s' % (tag)
+        print repr(body)
 
     def _prepare_stream(self, host, port, which):
         import mod_pywebsocket.common
         from mod_pywebsocket.stream import Stream
         from mod_pywebsocket.stream import StreamOptions
 
+        self._socket = socket.socket()
+        self._socket.settimeout(self._options.socket_timeout)
+        self._socket.connect((host, port))
+
+        uri = '/%d/%s' % (int(time.time()), which)
         handshake = wsclient.ClientHandshakeProcessor(self._socket, host, port)
-        handshake.handshake(which)
+        handshake.handshake(uri)
 
         request = wsclient.ClientRequest(self._socket)
         request.ws_version = mod_pywebsocket.common.VERSION_HYBI13
@@ -122,38 +131,62 @@ class KiwiSDRClientBase(object):
 
         self._stream = Stream(request, stream_option)
 
-    def set_mod(self, mod, lc, hc, freq):
-        if mod == 'iq':
-            self._isIQ = True
-        self._stream.send_message('SET mod=%s low_cut=%d high_cut=%d freq=%.3f' % (mod, lc, hc, freq))
-
-    def set_agc(self, on=False, hang=False, thresh=-100, slope=6, decay=1000, gain=50):
-        self._stream.send_message('SET agc=%d hang=%d thresh=%d slope=%d decay=%d manGain=%d' % (on, hang, thresh, slope, decay, gain))
-
-    def set_squelch(self, sq, thresh):
-        self._stream.send_message('SET squelch=%d max=%d' % (sq, thresh))
-
-    def set_autonotch(self, val):
-        self._stream.send_message('SET autonotch=%d' % (val))
-
-    def set_name(self, name):
-        self._stream.send_message('SET name=%s' % (name))
-
-    def set_geo(self, geo):
-        self._stream.send_message('SET geo=%s' % (geo))
+    def _send_message(self, msg):
+        self._stream.send_message(msg)
 
     def _set_auth(self, client_type, password=''):
-        self._stream.send_message('SET auth t=%s p=%s' % (client_type, password))
+        self._send_message('SET auth t=%s p=%s' % (client_type, password))
 
-    def _set_ar_ok(self, ar_in, ar_out):
-        self._stream.send_message('SET AR OK in=%d out=%d' % (ar_in, ar_out))
+    def set_name(self, name):
+        self._send_message('SET name=%s' % (name))
 
-    def _set_gen(self, freq, attn):
-        self._stream.send_message('SET genattn=%d' % (attn))
-        self._stream.send_message('SET gen=%d mix=%d' % (freq, -1))
+    def set_geo(self, geo):
+        self._send_message('SET geo=%s' % (geo))
+
+    def set_inactivity_timeout(self, timeout):
+        self._send_message('SET OVERRIDE inactivity_timeout=%d' % (timeout))
 
     def _set_keepalive(self):
-        self._stream.send_message('SET keepalive')
+        self._send_message('SET keepalive')
+
+    def _process_ws_message(self, message):
+        tag, body = message.split(' ', 1)
+        self._process_message(tag, body)
+
+
+class KiwiSDRSoundStream(KiwiSDRStreamBase):
+    """KiwiSDR WebSocket stream client: the SND stream."""
+
+    def __init__(self):
+        self._decoder = ImaAdpcmDecoder()
+        self._sample_rate = None
+        self._version_major = None
+        self._version_minor = None
+        self._modulation = None
+
+    def connect(self, host, port):
+        self._prepare_stream(host, port, 'SND')
+
+    def set_mod(self, mod, lc, hc, freq):
+        mod = mod.lower()
+        self._modulation = mod
+        self._send_message('SET mod=%s low_cut=%d high_cut=%d freq=%.3f' % (mod, lc, hc, freq))
+
+    def set_agc(self, on=False, hang=False, thresh=-100, slope=6, decay=1000, gain=50):
+        self._send_message('SET agc=%d hang=%d thresh=%d slope=%d decay=%d manGain=%d' % (on, hang, thresh, slope, decay, gain))
+
+    def set_squelch(self, sq, thresh):
+        self._send_message('SET squelch=%d max=%d' % (sq, thresh))
+
+    def set_autonotch(self, val):
+        self._send_message('SET autonotch=%d' % (val))
+
+    def _set_ar_ok(self, ar_in, ar_out):
+        self._send_message('SET AR OK in=%d out=%d' % (ar_in, ar_out))
+
+    def _set_gen(self, freq, attn):
+        self._send_message('SET genattn=%d' % (attn))
+        self._send_message('SET gen=%d mix=%d' % (freq, -1))
 
     def _process_msg_param(self, name, value):
         print "%s: %s" % (name, value)
@@ -187,22 +220,42 @@ class KiwiSDRClientBase(object):
             if self._version_major is not None and self._version_minor is not None:
                 logging.info("Server version: %s.%s", self._version_major, self._version_minor)
 
+    def _process_message(self, tag, body):
+        if tag == 'MSG':
+            self._process_msg(body)
+        elif tag == 'SND':
+            self._process_aud(body)
+            # Ensure we don't get kicked due to timeouts
+            self._set_keepalive()
+        else:
+            pass
+
     def _process_msg(self, body):
         for pair in body.split(' '):
             name, value = pair.split('=', 1)
             self._process_msg_param(name, value)
 
     def _process_aud(self, body):
-        seq = struct.unpack('<I', body[:4])[0]
+        seq = struct.unpack('<I', body[0:4])[0]
         smeter = struct.unpack('>H', body[4:6])[0]
         data = body[6:]
         rssi = (smeter & 0x0FFF) // 10 - 127
-        self._process_samples(seq, data if self._isIQ else self._decoder.decode(data), rssi)
+        if self._modulation == 'iq':
+            count = len(data) // 2
+            data = struct.unpack('>%dh' % count, data)
+            samples = [ complex(data[i+0], data[i+1]) for i in xrange(0, count, 2) ]
+            self._process_iq_samples(seq, samples, rssi)
+        else:
+            samples = self._decoder.decode(data)
+            self._process_audio_samples(seq, samples, rssi)
 
     def _on_sample_rate_change(self):
         pass
 
-    def _process_samples(self, seq, samples, rssi):
+    def _process_audio_samples(self, seq, samples, rssi):
+        pass
+
+    def _process_iq_samples(self, seq, samples, rssi):
         pass
 
     def _setup_rx_params(self):
@@ -212,28 +265,18 @@ class KiwiSDRClientBase(object):
     def run(self):
         """Run the client."""
 
-        self._decoder = ImaAdpcmDecoder()
         try:
             self._set_auth('kiwi', '')
             # Loop forever
             while True:
                 try:
                     received = self._stream.receive_message()
+                    self._process_ws_message(received)
                 except KeyboardInterrupt:
                     break
-                # print repr(received)
-                id, body = received.split(' ', 1)
-                if id == 'MSG':
-                    self._process_msg(body)
-                elif id == 'SND':
-                    self._process_aud(body)
-                    # Ensure we don't get kicked due to timeouts
-                    self._set_keepalive()
-                else:
-                    print 'Unknown message ID: %s' % (id)
-                    print repr(received)
             self._stream.close_connection()
         finally:
             self._socket.close()
+
 
 # EOF
