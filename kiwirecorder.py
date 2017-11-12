@@ -10,9 +10,12 @@ from optparse import OptionParser
 
 import kiwiclient
 
-def _write_wav_header(fp, filesize, samplerate):
+def _write_wav_header(fp, filesize, samplerate, num_channels):
     fp.write(struct.pack('<4sI4s', 'RIFF', filesize - 8, 'WAVE'))
-    fp.write(struct.pack('<4sIHHIIHH', 'fmt ', 16, 1, 1, samplerate, samplerate * 16 / 8, 16 / 8, 16))
+    bits_per_sample = 16
+    byte_rate       = samplerate * num_channels * bits_per_sample / 8
+    block_align     = num_channels * bits_per_sample / 8
+    fp.write(struct.pack('<4sIHHIIHH', 'fmt ', 16, 1, num_channels, samplerate, byte_rate, block_align, bits_per_sample))
     fp.write(struct.pack('<4sI', 'data', filesize - 12 - 8 - 16 - 8))
 
 class KiwiRecorder(kiwiclient.KiwiSDRSoundStream):
@@ -26,6 +29,7 @@ class KiwiRecorder(kiwiclient.KiwiSDRSoundStream):
             self._nf_array.insert(x, 0)
         self._nf_samples = 0
         self._nf_index = 0
+        self._num_channels = 2 if options.modulation == 'iq' else 1
 
     def _setup_rx_params(self):
         mod = self._options.modulation
@@ -51,7 +55,7 @@ class KiwiRecorder(kiwiclient.KiwiSDRSoundStream):
         if self._nf_samples < len(self._nf_array):
             self._nf_samples += 1
             return
-            
+
         median_nf = sorted(self._nf_array)[len(self._nf_array) // 3]
         rssi_thresh = median_nf + self._options.thresh
         is_open = self._squelch_on_seq is not None
@@ -71,6 +75,14 @@ class KiwiRecorder(kiwiclient.KiwiSDRSoundStream):
             return
         self._write_samples(samples)
 
+    def _process_iq_samples(self, seq, samples, rssi):
+        sys.stdout.write('\rBlock: %08x, RSSI: %-04d' % (seq, rssi))
+        ## convert list of complex numbers to an array
+        s = array.array('h')
+        for x in [[y.real, y.imag] for y in samples]:
+            s.extend(map(int, x))
+        self._write_samples(s)
+
     def _get_output_filename(self):
         ts = time.strftime('%Y%m%dT%H%M%SZ', self._start_ts)
         sta = '' if self._options.station is None else '_' + self._options.station
@@ -81,7 +93,7 @@ class KiwiRecorder(kiwiclient.KiwiSDRSoundStream):
             fp.seek(0, os.SEEK_END)
             filesize = fp.tell()
             fp.seek(0, os.SEEK_SET)
-            _write_wav_header(fp, filesize, int(self._sample_rate))
+            _write_wav_header(fp, filesize, int(self._sample_rate), self._num_channels)
 
     def _write_samples(self, samples):
         """Output to a file on the disk."""
@@ -90,7 +102,7 @@ class KiwiRecorder(kiwiclient.KiwiSDRSoundStream):
             self._start_ts = now
             # Write a static WAV header
             with open(self._get_output_filename(), 'wb') as fp:
-                _write_wav_header(fp, 666, int(self._sample_rate))
+                _write_wav_header(fp, 100, int(self._sample_rate), self._num_channels)
             print "\nStarted a new file: %s" % (self._get_output_filename())
         with open(self._get_output_filename(), 'ab') as fp:
             # TODO: something better than that
@@ -147,7 +159,7 @@ def main():
 
     while True:
         recorder = KiwiRecorder(options)
-        
+
         # Connect
         try:
             recorder.connect(options.server_host, options.server_port)
