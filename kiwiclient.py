@@ -59,22 +59,14 @@ class ImaAdpcmDecoder(object):
         return sample
 
     def decode(self, data):
+        fcn = ord if isinstance(data, str) else lambda x : x
         samples = array.array('h')
-        if isinstance(data, str):
-            for b in data:
-                b = ord(b)
-                sample0 = self._decode_sample(b & 0x0F)
-                sample1 = self._decode_sample(b >> 4)
-                samples.append(sample0)
-                samples.append(sample1)
-        else:
-            for b in data:
-                sample0 = self._decode_sample(b & 0x0F)
-                sample1 = self._decode_sample(b >> 4)
-                samples.append(sample0)
-                samples.append(sample1)
+        for b in map(fcn, data):
+            sample0 = self._decode_sample(b & 0x0F)
+            sample1 = self._decode_sample(b >> 4)
+            samples.append(sample0)
+            samples.append(sample1)
         return samples
-
 
 #
 # KiwiSDR WebSocket client
