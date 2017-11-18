@@ -149,7 +149,7 @@ def main():
     parser.add_option('-m', '--modulation',
                       dest='modulation',
                       type='string', default='am',
-                      help='Modulation; one of am, lsb, usb, cw, nbfm')
+                      help='Modulation; one of am, lsb, usb, cw, nbfm, iq')
     parser.add_option('-L', '--lp-cutoff',
                       dest='lp_cut',
                       type='float', default=100,
