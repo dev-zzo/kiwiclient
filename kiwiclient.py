@@ -233,10 +233,13 @@ class KiwiSDRSoundStream(KiwiSDRStreamBase):
         data = body[6:]
         rssi = (smeter & 0x0FFF) // 10 - 127
         if self._modulation == 'iq':
+            gps = dict(zip(['last_gps_solution', 'dummy', 'gpssec', 'gpsnsec'], struct.unpack('<BBII', data[0:10])))
+            ## gps['gpsnsec'] = struct.unpack('<I', data[6:10])[0]
+            data  = data[10:]
             count = len(data) // 2
-            data = struct.unpack('>%dh' % count, data)
+            data  = struct.unpack('>%dh' % count, data)
             samples = [ complex(data[i+0], data[i+1]) for i in xrange(0, count, 2) ]
-            self._process_iq_samples(seq, samples, rssi)
+            self._process_iq_samples(seq, samples, rssi, gps)
         else:
             samples = self._decoder.decode(data)
             self._process_audio_samples(seq, samples, rssi)
@@ -247,7 +250,7 @@ class KiwiSDRSoundStream(KiwiSDRStreamBase):
     def _process_audio_samples(self, seq, samples, rssi):
         pass
 
-    def _process_iq_samples(self, seq, samples, rssi):
+    def _process_iq_samples(self, seq, samples, rssi, gps):
         pass
 
     def _setup_rx_params(self):
