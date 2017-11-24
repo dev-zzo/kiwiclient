@@ -178,6 +178,7 @@ def main():
                       help='AGC OFF (default gain=40)')
     parser.add_option('-g', '--agc-gain',
                       dest='agc_gain',
+                      type='float',
                       default=40,
                       help='AGC gain')
 
