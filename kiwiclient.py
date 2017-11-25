@@ -142,7 +142,8 @@ class KiwiSDRStreamBase(object):
         self._send_message('SET keepalive')
 
     def _process_ws_message(self, message):
-        tag, body = message.split(' ', 1)
+        tag = message[0:3]
+        body = message[4:]
         self._process_message(tag, body)
 
 
