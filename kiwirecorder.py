@@ -81,7 +81,8 @@ class KiwiRecorder(kiwiclient.KiwiSDRSoundStream):
         self._write_samples(samples, {})
 
     def _process_iq_samples(self, seq, samples, rssi, gps):
-        sys.stdout.write('\rBlock: %08x, RSSI: %-04d\n' % (seq, rssi))
+        sys.stdout.write('\rBlock: %08x, RSSI: %-04d' % (seq, rssi))
+        sys.stdout.flush()
         ## convert list of complex numbers to an array
         ##print gps['gpsnsec']-self._last_gps['gpsnsec']
         self._last_gps = gps
@@ -104,7 +105,7 @@ class KiwiRecorder(kiwiclient.KiwiSDRSoundStream):
 
     def _write_samples(self, samples, *args):
         """Output to a file on the disk."""
-        print '_write_samples', args
+        # print '_write_samples', args
         now = time.gmtime()
         if self._start_ts is None or self._start_ts.tm_hour != now.tm_hour:
             self._start_ts = now
