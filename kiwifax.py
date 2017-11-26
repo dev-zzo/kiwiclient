@@ -410,7 +410,7 @@ class KiwiFax(kiwiclient.KiwiSDRSoundStream):
         samples = self._iqconverter.process(samples)
         self._process_samples(seq, samples, rssi)
 
-    def _process_iq_samples(self, seq, samples, rssi):
+    def _process_iq_samples(self, seq, samples, rssi, gps):
         k = 1 / 32768.0
         samples = [ x * k for x in samples ]
         self._process_samples(seq, samples, rssi)
