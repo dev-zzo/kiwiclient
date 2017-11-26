@@ -368,8 +368,8 @@ class KiwiFax(kiwiclient.KiwiSDRSoundStream):
         # TODO: figure out proper AGC parameters
         self.set_agc(True)
         self.set_inactivity_timeout(0)
-        self.set_name('')
-        self.set_geo('Antarctica')
+        self.set_name('kiwifax.py')
+        # self.set_geo('Antarctica')
 
     def _on_sample_rate_change(self):
         sample_rate = float(self._sample_rate)

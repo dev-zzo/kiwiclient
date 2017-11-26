@@ -47,7 +47,7 @@ class KiwiRecorder(kiwiclient.KiwiSDRSoundStream):
         else:
             self.set_agc(on=True)
         self.set_inactivity_timeout(0)
-        self.set_name('')
+        self.set_name('kiwirecorder.py')
         # self.set_geo('Antarctica')
 
     def _process_audio_samples(self, seq, samples, rssi):
