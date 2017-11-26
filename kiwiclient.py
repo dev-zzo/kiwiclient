@@ -272,10 +272,15 @@ class KiwiSDRSoundStream(KiwiSDRStreamBase):
                     received = self._stream.receive_message()
                     self._process_ws_message(received)
                 except KeyboardInterrupt:
+                    print "\n"
                     break
-            self._stream.close_connection()
+            try:
+                self._stream.close_connection()
+            except Exception as e:
+                print "exception: %s" % e
         finally:
             self._socket.close()
+            print "exiting"
 
 
 # EOF
