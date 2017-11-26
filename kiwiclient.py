@@ -182,7 +182,10 @@ class KiwiSDRSoundStream(KiwiSDRStreamBase):
         self._send_message('SET gen=%d mix=%d' % (freq, -1))
 
     def _process_msg_param(self, name, value):
-        print "%s: %s" % (name, value)
+        if name == 'load_cfg':
+            print "load_cfg: (cfg info not printed)"
+        else:
+            print "%s: %s" % (name, value)
         # Handle error conditions
         if name == 'too_busy':
             raise KiwiTooBusyError('all %s client slots taken' % value)
