@@ -158,6 +158,7 @@ class KiwiSDRSoundStream(KiwiSDRStreamBase):
         self._modulation = None
 
     def connect(self, host, port):
+        #print "connect: %s:%s" % (host, port)
         self._prepare_stream(host, port, 'SND')
 
     def set_mod(self, mod, lc, hc, freq):
@@ -261,26 +262,21 @@ class KiwiSDRSoundStream(KiwiSDRStreamBase):
         self._set_mod('am', 100, 2800, 4625.0)
         self._set_agc(True)
 
+    def open(self):
+        self._set_auth('kiwi', '')
+
+    def close(self):
+        try:
+            self._stream.close_connection()
+            self._socket.close()
+        except Exception as e:
+            print "exception: %s" % e
+
     def run(self):
         """Run the client."""
 
-        try:
-            self._set_auth('kiwi', '')
-            # Loop forever
-            while True:
-                try:
-                    received = self._stream.receive_message()
-                    self._process_ws_message(received)
-                except KeyboardInterrupt:
-                    print "\n"
-                    break
-            try:
-                self._stream.close_connection()
-            except Exception as e:
-                print "exception: %s" % e
-        finally:
-            self._socket.close()
-            print "exiting"
+        received = self._stream.receive_message()
+        self._process_ws_message(received)
 
 
 # EOF

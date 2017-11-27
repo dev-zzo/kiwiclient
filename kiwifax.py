@@ -653,7 +653,7 @@ def main():
                       default='localhost', help='server host')
     parser.add_option('-p', '--server-port', '--server_port',
                       dest='server_port', type='int',
-                      default=8073, help='server port')
+                      default=8073, help='server port (default 8073)')
     parser.add_option('-q', '--iq',
                       dest='iq_mode',
                       action='store_true', default=False,
@@ -761,6 +761,7 @@ def main():
         except Exception as e:
             traceback.print_exc()
             break
+    print "exiting"
 
 
 if __name__ == '__main__':

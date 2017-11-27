@@ -20,9 +20,14 @@ def _write_wav_header(fp, filesize, samplerate, num_channels, is_kiwi_wav):
         fp.write(struct.pack('<4sI', 'data', filesize - 12 - 8 - 16 - 8))
 
 class KiwiRecorder(kiwiclient.KiwiSDRSoundStream):
-    def __init__(self, options):
+    def __init__(self, options, which):
         super(KiwiRecorder, self).__init__()
         self._options = options
+        freq = options.frequency
+        if which == 1 and options.frequency2:
+            freq = options.frequency2
+        #print "%s:%s freq=%d" % (options.server_host, options.server_port, freq)
+        self._freq = freq
         self._start_ts = None
         self._squelch_on_seq = None
         self._nf_array = array.array('i')
@@ -31,17 +36,16 @@ class KiwiRecorder(kiwiclient.KiwiSDRSoundStream):
         self._nf_samples = 0
         self._nf_index = 0
         self._num_channels = 2 if options.modulation == 'iq' else 1
-        self._last_gps = dict(zip(['last_gps_solution', 'dummy', 'gpssec', 'gpsnsec'], [0,0,0,0]));
+        self._last_gps = dict(zip(['last_gps_solution', 'dummy', 'gpssec', 'gpsnsec'], [0,0,0,0]))
 
     def _setup_rx_params(self):
         mod    = self._options.modulation
         lp_cut = self._options.lp_cut
         hp_cut = self._options.hp_cut
-        freq   = self._options.frequency
         if (mod == 'am'):
             # For AM, ignore the low pass filter cutoff
             lp_cut = -hp_cut
-        self.set_mod(mod, lp_cut, hp_cut, freq)
+        self.set_mod(mod, lp_cut, hp_cut, self._freq)
         if self._options.agc_off:
             self.set_agc(on=False, gain=self._options.agc_gain)
         else:
@@ -81,8 +85,8 @@ class KiwiRecorder(kiwiclient.KiwiSDRSoundStream):
         self._write_samples(samples, {})
 
     def _process_iq_samples(self, seq, samples, rssi, gps):
-        sys.stdout.write('\rBlock: %08x, RSSI: %-04d' % (seq, rssi))
-        sys.stdout.flush()
+        #sys.stdout.write('\rBlock: %08x, RSSI: %-04d' % (seq, rssi))
+        #sys.stdout.flush()
         ## convert list of complex numbers to an array
         ##print gps['gpsnsec']-self._last_gps['gpsnsec']
         self._last_gps = gps
@@ -94,7 +98,7 @@ class KiwiRecorder(kiwiclient.KiwiSDRSoundStream):
     def _get_output_filename(self):
         ts = time.strftime('%Y%m%dT%H%M%SZ', self._start_ts)
         sta = '' if self._options.station is None else '_' + self._options.station
-        return '%s_%d_%s%s.wav' % (ts, int(self._options.frequency * 1000), self._options.modulation, sta)
+        return '%s_%d_%s%s.wav' % (ts, int(self._freq * 1000), self._options.modulation, sta)
 
     def _update_wav_header(self):
         with open(self._get_output_filename(), 'r+b') as fp:
@@ -141,12 +145,26 @@ def main():
                       default='localhost', help='server host')
     parser.add_option('-p', '--server-port', '--server_port',
                       dest='server_port', type='int',
-                      default=8073, help='server port')
+                      default=8073, help='server port (default 8073)')
+
+    parser.add_option('-2', '--2servers',
+                      dest='two_servers', action='store_true',
+                      default=False, help='Connect to two servers simultaneously.')
+    parser.add_option('--s2', '--server-host2', '--server_host2',
+                      dest='server_host2', type='string',
+                      default='localhost', help='server host2')
+    parser.add_option('--p2', '--server-port2', '--server_port2',
+                      dest='server_port2', type='int',
+                      default=8073, help='server port2 (default 8073)')
 
     parser.add_option('-f', '--freq',
                       dest='frequency',
                       type='float', default=1000,
                       help='Frequency to tune to, in kHz.')
+    parser.add_option('--f2', '--freq2',
+                      dest='frequency2',
+                      type='float', default=0,
+                      help='Optional frequency for second server to tune to, in kHz.')
     parser.add_option('-m', '--modulation',
                       dest='modulation',
                       type='string', default='am',
@@ -188,21 +206,28 @@ def main():
     logging.basicConfig(level=logging.getLevelName(options.log_level.upper()))
 
     while True:
-        recorder = KiwiRecorder(options)
+        recorder = KiwiRecorder(options, 0)
+        if options.two_servers:
+            # print "recorder2"
+            recorder2 = KiwiRecorder(options, 1)
 
         # Connect
         try:
             recorder.connect(options.server_host, options.server_port)
+            if options.two_servers:
+                recorder2.connect(options.server_host2, options.server_port2)
         except KeyboardInterrupt:
             break
         except:
             print "Failed to connect, sleeping and reconnecting"
             time.sleep(15)
             continue
-        # Record
+
+        # Open
         try:
-            recorder.run()
-            break
+            recorder.open()
+            if options.two_servers:
+                recorder2.open()
         except KeyboardInterrupt:
             break
         except kiwiclient.KiwiTooBusyError:
@@ -212,6 +237,28 @@ def main():
         except Exception as e:
             traceback.print_exc()
             break
+
+        # Record
+        try:
+            while True:
+                recorder.run()
+                if options.two_servers:
+                    recorder2.run()
+        except KeyboardInterrupt:
+            break
+        except kiwiclient.KiwiTooBusyError:
+            print "Server too busy now"
+            time.sleep(15)
+            break
+        except Exception as e:
+            traceback.print_exc()
+            break
+
+    # Close
+    recorder.close()
+    if options.two_servers:
+        recorder2.close()
+    print "exiting"
 
 
 if __name__ == '__main__':
