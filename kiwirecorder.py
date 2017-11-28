@@ -98,7 +98,7 @@ class KiwiRecorder(kiwiclient.KiwiSDRSoundStream):
 
     def _get_output_filename(self):
         ts = time.strftime('%Y%m%dT%H%M%SZ', self._start_ts)
-        sta = '' if self._options.station is None else '_' + self._options.station
+        sta = '' if self._options.station is None else '_' + (self._options.station2 if self._server == 1 and self._options.station2 != None else self._options.station)
         server = '' if self._options.two_servers == False else '_server' + str(self._server)
         return '%s_%d_%s%s%s.wav' % (ts, int(self._freq * 1000), self._options.modulation, sta, server)
 
@@ -142,10 +142,10 @@ def main():
     parser.add_option('-k', '--socket-timeout', '--socket_timeout',
                       dest='socket_timeout', type='int', default=10,
                       help='Timeout(sec) for sockets')
-    parser.add_option('-s', '--server-host', '--server_host',
+    parser.add_option('-s', '--s1', '--server-host', '--server_host',
                       dest='server_host', type='string',
                       default='localhost', help='server host')
-    parser.add_option('-p', '--server-port', '--server_port',
+    parser.add_option('-p', '--p1', '--server-port', '--server_port',
                       dest='server_port', type='int',
                       default=8073, help='server port (default 8073)')
 
@@ -159,7 +159,7 @@ def main():
                       dest='server_port2', type='int',
                       default=8073, help='server port2 (default 8073)')
 
-    parser.add_option('-f', '--freq',
+    parser.add_option('-f', '--freq', '--f1', '--freq1',
                       dest='frequency',
                       type='float', default=1000,
                       help='Frequency to tune to, in kHz.')
@@ -179,10 +179,14 @@ def main():
                       dest='hp_cut',
                       type='float', default=2600,
                       help='Low-pass cutoff frequency, in Hz.')
-    parser.add_option('--station', '--station',
+    parser.add_option('--station',
                       dest='station',
                       type='string', default=None,
-                      help='Station ID to be appended')
+                      help='Station ID to be appended.')
+    parser.add_option('--station2',
+                      dest='station2',
+                      type='string', default=None,
+                      help='Station ID to be appended for second server.')
     parser.add_option('-T', '--threshold',
                       dest='thresh',
                       type='float', default=0,
@@ -201,7 +205,7 @@ def main():
                       dest='agc_gain',
                       type='float',
                       default=40,
-                      help='AGC gain')
+                      help='AGC gain.')
 
     (options, unused_args) = parser.parse_args()
 
