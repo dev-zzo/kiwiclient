@@ -20,11 +20,12 @@ def _write_wav_header(fp, filesize, samplerate, num_channels, is_kiwi_wav):
         fp.write(struct.pack('<4sI', 'data', filesize - 12 - 8 - 16 - 8))
 
 class KiwiRecorder(kiwiclient.KiwiSDRSoundStream):
-    def __init__(self, options, which):
+    def __init__(self, options, server):
         super(KiwiRecorder, self).__init__()
         self._options = options
+        self._server = server
         freq = options.frequency
-        if which == 1 and options.frequency2:
+        if server == 1 and options.frequency2:
             freq = options.frequency2
         #print "%s:%s freq=%d" % (options.server_host, options.server_port, freq)
         self._freq = freq
@@ -98,7 +99,8 @@ class KiwiRecorder(kiwiclient.KiwiSDRSoundStream):
     def _get_output_filename(self):
         ts = time.strftime('%Y%m%dT%H%M%SZ', self._start_ts)
         sta = '' if self._options.station is None else '_' + self._options.station
-        return '%s_%d_%s%s.wav' % (ts, int(self._freq * 1000), self._options.modulation, sta)
+        server = '' if self._options.two_servers == False else '_server' + str(self._server)
+        return '%s_%d_%s%s%s.wav' % (ts, int(self._freq * 1000), self._options.modulation, sta, server)
 
     def _update_wav_header(self):
         with open(self._get_output_filename(), 'r+b') as fp:

@@ -29,9 +29,9 @@ HOST_IQ1 = fenu-radio.ddns.net
 HOST_IQ2 = sdrtas.ddns.net
 
 two:
-	python kiwirecorder.py -s $(HOST_IQ1) -f 1234 -2 --s2 $(HOST_IQ2) --f2 2345 -m iq -L -5000 -H 5000
+#	python kiwirecorder.py -s $(HOST_IQ1) -f 1234 -2 --s2 $(HOST_IQ2) --f2 2345 -m iq -L -5000 -H 5000
 #   single frequency used by both servers
-#	python kiwirecorder.py -s $(HOST_IQ1) -f 4567 -2 --s2 $(HOST_IQ2) -m iq -L -5000 -H 5000
+	python kiwirecorder.py -s $(HOST_IQ1) -f 4567 -2 --s2 $(HOST_IQ2) -m iq -L -5000 -H 5000
 
 
 help:
