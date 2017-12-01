@@ -368,8 +368,8 @@ class KiwiFax(kiwiclient.KiwiSDRSoundStream):
         # TODO: figure out proper AGC parameters
         self.set_agc(True)
         self.set_inactivity_timeout(0)
-        self.set_name('')
-        self.set_geo('Antarctica')
+        self.set_name('kiwifax.py')
+        # self.set_geo('Antarctica')
 
     def _on_sample_rate_change(self):
         sample_rate = float(self._sample_rate)
@@ -410,7 +410,7 @@ class KiwiFax(kiwiclient.KiwiSDRSoundStream):
         samples = self._iqconverter.process(samples)
         self._process_samples(seq, samples, rssi)
 
-    def _process_iq_samples(self, seq, samples, rssi):
+    def _process_iq_samples(self, seq, samples, rssi, gps):
         k = 1 / 32768.0
         samples = [ x * k for x in samples ]
         self._process_samples(seq, samples, rssi)
@@ -653,11 +653,15 @@ def main():
                       default='localhost', help='server host')
     parser.add_option('-p', '--server-port', '--server_port',
                       dest='server_port', type='int',
-                      default=8073, help='server port')
+                      default=8073, help='server port (default 8073)')
+    parser.add_option('-q', '--iq',
+                      dest='iq_mode',
+                      action='store_true', default=False,
+                      help='IQ data mode')
 
     parser.add_option('-f', '--freq',
                       dest='frequency',
-                      type='float',
+                      type='float', default=4610,
                       help='Frequency to tune to, in kHz (will be tuned down by 1.9kHz)')
     parser.add_option('--station', '--station',
                       dest='station',
@@ -757,6 +761,7 @@ def main():
         except Exception as e:
             traceback.print_exc()
             break
+    print "exiting"
 
 
 if __name__ == '__main__':

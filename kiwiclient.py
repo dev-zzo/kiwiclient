@@ -59,22 +59,14 @@ class ImaAdpcmDecoder(object):
         return sample
 
     def decode(self, data):
+        fcn = ord if isinstance(data, str) else lambda x : x
         samples = array.array('h')
-        if isinstance(data, str):
-            for b in data:
-                b = ord(b)
-                sample0 = self._decode_sample(b & 0x0F)
-                sample1 = self._decode_sample(b >> 4)
-                samples.append(sample0)
-                samples.append(sample1)
-        else:
-            for b in data:
-                sample0 = self._decode_sample(b & 0x0F)
-                sample1 = self._decode_sample(b >> 4)
-                samples.append(sample0)
-                samples.append(sample1)
+        for b in map(fcn, data):
+            sample0 = self._decode_sample(b & 0x0F)
+            sample1 = self._decode_sample(b >> 4)
+            samples.append(sample0)
+            samples.append(sample1)
         return samples
-
 
 #
 # KiwiSDR WebSocket client
@@ -96,6 +88,7 @@ class KiwiSDRStreamBase(object):
         self._socket = None
         self._decoder = None
         self._sample_rate = None
+        self._isIQ = False
         self._version_major = None
         self._version_minor = None
         self._modulation = None
@@ -137,7 +130,7 @@ class KiwiSDRStreamBase(object):
         self._send_message('SET auth t=%s p=%s' % (client_type, password))
 
     def set_name(self, name):
-        self._send_message('SET name=%s' % (name))
+        self._send_message('SET ident_user=%s' % (name))
 
     def set_geo(self, geo):
         self._send_message('SET geo=%s' % (geo))
@@ -149,7 +142,8 @@ class KiwiSDRStreamBase(object):
         self._send_message('SET keepalive')
 
     def _process_ws_message(self, message):
-        tag, body = message.split(' ', 1)
+        tag = message[0:3]
+        body = message[4:]
         self._process_message(tag, body)
 
 
@@ -164,6 +158,7 @@ class KiwiSDRSoundStream(KiwiSDRStreamBase):
         self._modulation = None
 
     def connect(self, host, port):
+        #print "connect: %s:%s" % (host, port)
         self._prepare_stream(host, port, 'SND')
 
     def set_mod(self, mod, lc, hc, freq):
@@ -188,7 +183,10 @@ class KiwiSDRSoundStream(KiwiSDRStreamBase):
         self._send_message('SET gen=%d mix=%d' % (freq, -1))
 
     def _process_msg_param(self, name, value):
-        print "%s: %s" % (name, value)
+        if name == 'load_cfg':
+            print "load_cfg: (cfg info not printed)"
+        else:
+            print "%s: %s" % (name, value)
         # Handle error conditions
         if name == 'too_busy':
             raise KiwiTooBusyError('all %s client slots taken' % value)
@@ -240,10 +238,13 @@ class KiwiSDRSoundStream(KiwiSDRStreamBase):
         data = body[6:]
         rssi = (smeter & 0x0FFF) // 10 - 127
         if self._modulation == 'iq':
+            gps = dict(zip(['last_gps_solution', 'dummy', 'gpssec', 'gpsnsec'], struct.unpack('<BBII', data[0:10])))
+            ## gps['gpsnsec'] = struct.unpack('<I', data[6:10])[0]
+            data  = data[10:]
             count = len(data) // 2
-            data = struct.unpack('>%dh' % count, data)
+            data  = struct.unpack('>%dh' % count, data)
             samples = [ complex(data[i+0], data[i+1]) for i in xrange(0, count, 2) ]
-            self._process_iq_samples(seq, samples, rssi)
+            self._process_iq_samples(seq, samples, rssi, gps)
         else:
             samples = self._decoder.decode(data)
             self._process_audio_samples(seq, samples, rssi)
@@ -254,28 +255,28 @@ class KiwiSDRSoundStream(KiwiSDRStreamBase):
     def _process_audio_samples(self, seq, samples, rssi):
         pass
 
-    def _process_iq_samples(self, seq, samples, rssi):
+    def _process_iq_samples(self, seq, samples, rssi, gps):
         pass
 
     def _setup_rx_params(self):
         self._set_mod('am', 100, 2800, 4625.0)
         self._set_agc(True)
 
+    def open(self):
+        self._set_auth('kiwi', '')
+
+    def close(self):
+        try:
+            self._stream.close_connection()
+            self._socket.close()
+        except Exception as e:
+            print "exception: %s" % e
+
     def run(self):
         """Run the client."""
 
-        try:
-            self._set_auth('kiwi', '')
-            # Loop forever
-            while True:
-                try:
-                    received = self._stream.receive_message()
-                    self._process_ws_message(received)
-                except KeyboardInterrupt:
-                    break
-            self._stream.close_connection()
-        finally:
-            self._socket.close()
+        received = self._stream.receive_message()
+        self._process_ws_message(received)
 
 
 # EOF
